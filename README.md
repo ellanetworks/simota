@@ -9,7 +9,7 @@ A minimal SIM OTA platform. It keeps SIM cards and their SCP80 key sets, and run
 go run ./cmd/simota -config simota.yaml
 ```
 
-simota builds against the SMPP 3.4 library of Ella SMSC, `github.com/ellanetworks/smsc/smpp`, from a sibling checkout of `ellanetworks/smsc`: `go.mod` replaces it with `../smsc/smpp`, so `go install` and CI jobs that check out simota alone cannot build it yet. Once the library is merged into `ellanetworks/smsc`, the `replace` will be replaced by a pseudo-version pin of that commit.
+simota uses the SMPP 3.4 library of Ella SMSC, `github.com/ellanetworks/smsc/smpp`, pinned in `go.mod` to a commit of `ellanetworks/smsc`.
 
 The UI and the API (`/api/v1`, described at `/api/v1/openapi.yaml`) listen on `127.0.0.1:5020`. They have no authentication yet, so keep them on the loopback interface.
 
