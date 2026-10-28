@@ -1,5 +1,6 @@
-// Package jobs runs OTA jobs: it sends each queued job's commands to its card through Ella SMSC over SMPP 3.4, one at
-// a time, and records the card's answers and the SMSC's delivery receipts that the SMSC pushes back as deliver_sm.
+// Package jobs runs OTA jobs: it sends each queued job's commands to its card through an SMSC, such as Ella SMSC, over
+// SMPP 3.4, one at a time, and records the card's answers and the SMSC's delivery receipts that the SMSC pushes back
+// as deliver_sm.
 package jobs
 
 import (
@@ -56,30 +57,56 @@ const (
 	// DCSClass2 is the data_coding 1111 0110, GSM message class control (SMPP 3.4 section 5.2.19, note e): 8-bit data
 	// of message class 2, (U)SIM specific (TS 23.038 clause 4), which TS 23.040 clause 9.2.3.9 requires for TP-PID 7F.
 	DCSClass2 = 0xf6
-	// RegisteredDelivery asks for an SME Manual/User Acknowledgement, bits 3-2 = 10, which carries the card's PoR, and
-	// for an SMSC delivery receipt on success or failure, bits 1-0 = 01 (SMPP 3.4 section 5.2.17).
+	// RegisteredDelivery asks for an SME Manual/User Acknowledgement, bits 3-2 = 10, which may carry the card's PoR,
+	// and for an SMSC delivery receipt on success or failure, bits 1-0 = 01 (SMPP 3.4 section 5.2.17). An SMSC that
+	// does not support the acknowledgement ignores it; the PoR is recognised by its content however it comes.
 	RegisteredDelivery = 0x09
 )
 
-// The message types of a deliver_sm's esm_class, bits 5-2 (SMPP 3.4 section 5.2.12).
+// The message types of a deliver_sm's esm_class, bits 5-2 (SMPP 3.4 section 5.2.12). The card's answer comes as a
+// normal message or as an SME Manual/User Acknowledgement, as the SMSC chooses; a receipt is an SMSC Delivery Receipt.
 const (
+	messageTypeDefault = 0x0
 	messageTypeReceipt = 0x1
 	messageTypeUserAck = 0x4
 )
 
-// receiptGrace is how long past the validity a sent job waits for its receipt: the SMSC sends it when it gives up on
-// the message, and again after a failed attempt to send it.
-const receiptGrace = time.Hour
+// responseUDH is the user data header of a Response Packet in a single short message: its length, then IEI '71' with
+// a null length (TS 31.115 clause 4.4).
+var responseUDH = []byte{0x02, 0x71, 0x00}
+
+// answerGrace is how long past the validity of its command a sent job waits, while bound, for the card's answer or the
+// SMSC's receipt before it is closed without a PoR. The SMSC sends the receipt when it gives up on the message, at the
+// end of the validity, and sends a deliver_sm again when simota answers it with a temporary error or is unbound. SMPP
+// 3.4 leaves the SMSC's retry schedule open; Ella SMSC doubles its interval up to 1 hour, so 6 hours leave room for
+// several retries at the longest interval of such a schedule. A PoR that comes later is still recorded (see
+// AwaitingPoR), so the grace only bounds how long a job shows as sent.
+const answerGrace = 6 * time.Hour
+
+// MaxValidity is the longest validity of a command: 99 days, the most that a relative validity_period with
+// normalised fields tells (SMPP 3.4 section 7.1.1.2). An OTA command older than that is stale anyway.
+const MaxValidity = 99 * 24 * time.Hour
+
+// After the SMSC throttles simota or has its queue full, the runner sends nothing for a backoff that doubles from
+// minBackoff to maxBackoff, and a command that the SMSC fails to take maxAttempts times fails.
+const (
+	minBackoff  = 10 * time.Second
+	maxBackoff  = 5 * time.Minute
+	maxAttempts = 10
+)
 
 type Store interface {
 	GetCard(ctx context.Context, iccid string) (db.Card, error)
 	NextCounter(ctx context.Context, iccid string, version int) (uint64, error)
 	JobsIn(ctx context.Context, status db.JobStatus, limit int) ([]db.Job, error)
 	SentJob(ctx context.Context, messageID string) (db.Job, error)
-	SentJobTo(ctx context.Context, msisdn string) (db.Job, error)
-	MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte) error
+	AwaitingPoR(ctx context.Context, msisdn string, tar []byte) ([]db.Job, error)
+	MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte, expiresAt time.Time) error
 	AdvanceJob(ctx context.Context, j db.Job) error
 	FinishJob(ctx context.Context, j db.Job) error
+	ExpireJob(ctx context.Context, j db.Job) error
+	ReviseJob(ctx context.Context, j db.Job) error
+	ResumeJob(ctx context.Context, j db.Job) error
 }
 
 // SMSC is the SMPP session to the SMSC.
@@ -117,12 +144,26 @@ type Runner struct {
 	Now func() time.Time
 
 	wake chan struct{}
-	// mu orders a submit_sm and the recording of its message_id before any deliver_sm about it is handled.
+	// mu orders a submit_sm and the recording of its counter and message_id before any deliver_sm about it is
+	// handled, and serialises the changes of sent jobs. A deliver_sm waits for the submit_sm in progress, at most the
+	// session's response timer, which is acceptable at simota's rate.
 	mu sync.Mutex
+
+	// The fields below are Step's.
+	//
+	// boundSince is when Step first saw the session bound, zero while unbound. attempts counts the failed submits of
+	// a job's current command. holdUntil ends the backoff after a throttling, of length backoff.
+	boundSince time.Time
+	attempts   map[int64]int
+	holdUntil  time.Time
+	backoff    time.Duration
 }
 
 func NewRunner(store Store, connect func(ctx context.Context) (Gateway, error), interval time.Duration, logger *slog.Logger) *Runner {
-	return &Runner{Store: store, Connect: connect, Interval: interval, Logger: logger, wake: make(chan struct{}, 1)}
+	return &Runner{
+		Store: store, Connect: connect, Interval: interval, Logger: logger, wake: make(chan struct{}, 1),
+		attempts: map[int64]int{},
+	}
 }
 
 func (r *Runner) now() time.Time {
@@ -158,8 +199,9 @@ func (r *Runner) Run(ctx context.Context) {
 	}
 }
 
-// Step closes the sent jobs that no receipt answered in time, then sends the queued ones. A job whose submit_sm
-// fails without the SMSC refusing it stays queued, for the next step.
+// Step closes the sent jobs that nothing answered in time, then sends the queued ones, all only while bound: the SMSC
+// holds its deliver_sm while simota is unbound. A job whose submit_sm fails without the SMSC refusing it stays
+// queued, for a later step.
 func (r *Runner) Step(ctx context.Context) {
 	gw, err := r.Connect(ctx)
 	if errors.Is(err, ErrNoGateway) {
@@ -171,26 +213,26 @@ func (r *Runner) Step(ctx context.Context) {
 		return
 	}
 
-	sent, err := r.Store.JobsIn(ctx, db.JobSent, batch)
-	if err != nil {
-		r.Logger.Error("failed to list sent jobs", slog.Any("error", err))
+	if !gw.SMSC.Bound() {
+		r.boundSince = time.Time{}
+		r.Logger.Debug("not bound to the SMSC, jobs wait")
+
 		return
 	}
 
-	for _, j := range sent {
-		if r.now().Sub(j.UpdatedAt) > gw.Validity+receiptGrace {
-			r.finish(ctx, noPoR(j, "no delivery receipt from the SMSC within the validity of the message"))
-		}
+	if r.boundSince.IsZero() {
+		r.boundSince = r.now()
+	}
+
+	r.sweep(ctx)
+
+	if r.now().Before(r.holdUntil) {
+		return
 	}
 
 	queued, err := r.Store.JobsIn(ctx, db.JobQueued, batch)
 	if err != nil {
 		r.Logger.Error("failed to list queued jobs", slog.Any("error", err))
-		return
-	}
-
-	if len(queued) > 0 && !gw.SMSC.Bound() {
-		r.Logger.Debug("not bound to the SMSC, jobs wait", slog.Int("queued", len(queued)))
 		return
 	}
 
@@ -201,7 +243,43 @@ func (r *Runner) Step(ctx context.Context) {
 	}
 }
 
-// send sends a queued job's current command, and reports whether the next job may be sent: not while unbound.
+// sweep closes, without a PoR, the sent jobs answered by nothing answerGrace past the validity of their command, nor
+// in answerGrace of being bound, which leaves the SMSC time to send what it held while simota was unbound.
+func (r *Runner) sweep(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := r.now()
+	if now.Sub(r.boundSince) <= answerGrace {
+		return
+	}
+
+	sent, err := r.Store.JobsIn(ctx, db.JobSent, batch)
+	if err != nil {
+		r.Logger.Error("failed to list sent jobs", slog.Any("error", err))
+		return
+	}
+
+	for _, j := range sent {
+		if now.Sub(j.ExpiresAt) <= answerGrace {
+			continue
+		}
+
+		next := noPoR(j, "no PoR and no delivery receipt from the SMSC within the validity of the message")
+		next.PoRMissing = true
+
+		switch err := r.Store.ExpireJob(ctx, next); {
+		case errors.Is(err, db.ErrNotFound):
+		case err != nil:
+			r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
+		default:
+			r.logFinished(next)
+		}
+	}
+}
+
+// send sends a queued job's current command, and reports whether the next job may be sent: not while unbound or
+// throttled.
 func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 	card, keyset, err := r.cardOf(ctx, j)
 	if err != nil {
@@ -236,7 +314,7 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 		return true
 	}
 
-	sm, err := SubmitSM(gw.Originator, card.MSISDN, gw.Validity, append(udh, ud...), r.now())
+	sm, err := SubmitSM(gw.Originator, card.MSISDN, gw.Validity, append(udh, ud...))
 	if err != nil {
 		r.fail(ctx, j, err.Error())
 		return true
@@ -252,25 +330,67 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 		r.Logger.Debug("not bound to the SMSC, jobs wait", slog.Int64("job", j.ID))
 		return false
 	case Rejected(err):
+		delete(r.attempts, j.ID)
 		r.fail(ctx, j, fmt.Sprintf("SMSC refused the message: %v", err))
+
 		return true
 	case err != nil:
 		// The counter is spent: the next attempt takes a higher one, which the card accepts.
-		r.Logger.Warn("failed to submit job, will retry", slog.Int64("job", j.ID), slog.Any("error", err))
-		return true
+		return r.retry(ctx, j, err)
 	}
 
-	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage); err != nil {
+	r.backoff = 0
+
+	// If the message cannot be recorded, the job stays queued and a later step sends its command again, with a new,
+	// higher counter. The card executes it as a new command (TS 102 225 clause 5.1.4), which is harmless: a command
+	// writes the same entry and reads it back, or reads. The first message's PoR carries the spent counter, so it
+	// answers no job's command and is left aside; a duplicate never reuses a counter, which the card would refuse.
+	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage, r.now().Add(gw.Validity)); err != nil {
 		r.Logger.Error("failed to mark job sent", slog.Int64("job", j.ID), slog.String("message", id), slog.Any("error", err))
+		return r.retry(ctx, j, fmt.Errorf("record message %s: %w", id, err))
 	}
+
+	delete(r.attempts, j.ID)
 
 	return true
 }
 
+// retry counts a failed submit of a job's command and fails the job at the maxAttempts-th. After a throttling or a
+// full queue (SMPP 3.4 section 5.1.3), it backs off and stops the batch; while the SMSC unbinds, it stops it too.
+func (r *Runner) retry(ctx context.Context, j db.Job, err error) bool {
+	r.attempts[j.ID]++
+	if r.attempts[j.ID] >= maxAttempts {
+		delete(r.attempts, j.ID)
+		r.fail(ctx, j, fmt.Sprintf("the SMSC did not take the message in %d attempts: %v", maxAttempts, err))
+
+		return true
+	}
+
+	r.Logger.Warn("failed to submit job, will retry", slog.Int64("job", j.ID), slog.Int("attempt", r.attempts[j.ID]),
+		slog.Any("error", err))
+
+	var se *smpp.StatusError
+	if !errors.As(err, &se) {
+		return true
+	}
+
+	switch se.Status {
+	case smpp.StatusThrottled, smpp.StatusMsgQFul:
+		r.backoff = min(max(2*r.backoff, minBackoff), maxBackoff)
+		r.holdUntil = r.now().Add(r.backoff)
+
+		return false
+	case smpp.StatusInvBndSts:
+		return false
+	default:
+		return true
+	}
+}
+
 // SubmitSM is the submit_sm of a command packet, user data header included, from originator to the card's msisdn,
-// both E.164 with a leading "+", valid for validity from now.
-func SubmitSM(originator, msisdn string, validity time.Duration, packet []byte, now time.Time) (*smpp.SubmitSM, error) {
-	vp, err := ValidityPeriod(validity, now)
+// both E.164 with a leading "+", valid for validity. It uses only the mandatory parameters of SMPP 3.4 section 4.4.1.
+func SubmitSM(originator, msisdn string, validity time.Duration, packet []byte) (*smpp.SubmitSM, error) {
+	vp, err := ValidityPeriod(validity)
 	if err != nil {
 		return nil, err
 	}
@@ -287,10 +407,13 @@ func SubmitSM(originator, msisdn string, validity time.Duration, packet []byte, 
 	}}, nil
 }
 
-// ValidityPeriod is the validity_period of a validity: relative (SMPP 3.4 section 7.1.1.2), in days, hours, minutes
-// and seconds of at most 99 each, or, for a longer one, absolute in UTC (section 7.1.1.1), from now.
-func ValidityPeriod(validity time.Duration, now time.Time) (string, error) {
+// ValidityPeriod is the validity_period of a validity of 1 second to MaxValidity: a relative time (SMPP 3.4 section
+// 7.1.1.2) in days, hours (00-23), minutes and seconds (00-59), to the second.
+func ValidityPeriod(validity time.Duration) (string, error) {
 	rest := validity.Round(time.Second)
+	if rest < time.Second || rest > MaxValidity {
+		return "", fmt.Errorf("validity %v is not between 1 second and %v", validity, MaxValidity)
+	}
 
 	var p smpp.RelativePeriod
 
@@ -298,20 +421,16 @@ func ValidityPeriod(validity time.Duration, now time.Time) (string, error) {
 		n    *int
 		unit time.Duration
 	}{{&p.Days, 24 * time.Hour}, {&p.Hours, time.Hour}, {&p.Minutes, time.Minute}, {&p.Seconds, time.Second}} {
-		*f.n = int(min(rest/f.unit, 99))
+		*f.n = int(rest / f.unit)
 		rest -= time.Duration(*f.n) * f.unit
 	}
 
-	if rest == 0 {
-		return smpp.FormatRelative(p)
-	}
-
-	return smpp.FormatAbsolute(now.Add(validity).UTC())
+	return smpp.FormatRelative(p)
 }
 
 // Rejected reports whether err is the SMSC refusing a submit_sm, which sending it again would not change, rather
-// than failing to answer it: any command_status but a throttling, a full queue or a system error (SMPP 3.4 section
-// 5.1.3, table 5-2).
+// than failing to answer it: any command_status but a throttling, a full queue, a system error, or a bind status that
+// does not allow it, as while the SMSC unbinds (SMPP 3.4 section 5.1.3, table 5-2).
 func Rejected(err error) bool {
 	var se *smpp.StatusError
 	if !errors.As(err, &se) {
@@ -319,7 +438,7 @@ func Rejected(err error) bool {
 	}
 
 	switch se.Status {
-	case smpp.StatusThrottled, smpp.StatusMsgQFul, smpp.StatusSysErr:
+	case smpp.StatusThrottled, smpp.StatusMsgQFul, smpp.StatusSysErr, smpp.StatusInvBndSts:
 		return false
 	default:
 		return true
@@ -337,8 +456,18 @@ func (r *Runner) cardOf(ctx context.Context, j db.Job) (db.Card, ota.Keyset, err
 		return db.Card{}, ota.Keyset{}, errors.New("the card has no MSISDN")
 	}
 
+	keyset, ok := keysetOf(card, j.KVN)
+	if !ok {
+		return db.Card{}, ota.Keyset{}, fmt.Errorf("the card has no key set %d", j.KVN)
+	}
+
+	return card, keyset, nil
+}
+
+// keysetOf is the key set of version kvn of a card.
+func keysetOf(card db.Card, kvn int) (ota.Keyset, bool) {
 	for _, k := range card.KeySets {
-		if k.Version != j.KVN {
+		if k.Version != kvn {
 			continue
 		}
 
@@ -347,15 +476,15 @@ func (r *Runner) cardOf(ctx context.Context, j db.Job) (db.Card, ota.Keyset, err
 			keyset.Algorithm = ota.AES
 		}
 
-		return card, keyset, nil
+		return keyset, true
 	}
 
-	return db.Card{}, ota.Keyset{}, fmt.Errorf("the card has no key set %d", j.KVN)
+	return ota.Keyset{}, false
 }
 
-// ServeSMPP takes the SMSC's deliver_sm: the card's answer, an SME Manual/User Acknowledgement, or the SMSC's
-// delivery receipt (SMPP 3.4 sections 2.11 and 5.2.12). It answers ESME_RX_T_APPN when it cannot record the outcome,
-// so that the SMSC sends the deliver_sm again later, and ESME_ROK otherwise, for a deliver_sm of no job too.
+// ServeSMPP takes the SMSC's deliver_sm: the card's answer or the SMSC's delivery receipt (SMPP 3.4 sections 2.11 and
+// 5.2.12). It answers ESME_RX_T_APPN when it cannot record the outcome, so that the SMSC sends the deliver_sm again
+// later, and ESME_ROK otherwise, for a deliver_sm of no job too.
 func (r *Runner) ServeSMPP(ctx context.Context, _ *smpp.Session, req smpp.Request) smpp.Response {
 	d, ok := req.PDU.(*smpp.DeliverSM)
 	if !ok {
@@ -370,126 +499,179 @@ func (r *Runner) ServeSMPP(ctx context.Context, _ *smpp.Session, req smpp.Reques
 	return smpp.Response{}
 }
 
-// Deliver records a deliver_sm on the job it is about.
+// Deliver records a deliver_sm on the job it is about. It is an error only when the outcome could not be stored.
 func (r *Runner) Deliver(ctx context.Context, d *smpp.DeliverSM) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	switch d.ESMClass >> 2 & 0x0f {
-	case messageTypeUserAck:
-		return r.answer(ctx, d)
 	case messageTypeReceipt:
 		return r.receipt(ctx, d)
-	default:
-		r.Logger.Info("ignoring a deliver_sm that is neither a SIM answer nor a receipt", slog.Int("esm_class", int(d.ESMClass)),
-			slog.String("source", d.Source.Addr))
-
-		return nil
+	case messageTypeDefault, messageTypeUserAck:
+		if packet, ok := responsePacket(d); ok {
+			return r.answer(ctx, d, packet)
+		}
 	}
+
+	r.Logger.Info("ignoring a deliver_sm that is neither a PoR nor a receipt", slog.Int("esm_class", int(d.ESMClass)),
+		slog.String("source", d.Source.Addr))
+
+	return nil
 }
 
-// jobOf is the sent job that a deliver_sm is about: the one whose message_id is the deliver_sm's
-// receipted_message_id, or, for a receipt without it, the id of its text (SMPP 3.4 appendix B). Without either, a SIM
-// answer is the current command's of its card, whose number is the answer's source (SMPP 3.4 section 2.11); the PoR's
-// TAR and counter then tell whether it answers that command.
-func (r *Runner) jobOf(ctx context.Context, d *smpp.DeliverSM, answer bool) (db.Job, error) {
-	id := ""
-
-	switch {
-	case d.Options.ReceiptedMessageID != nil:
-		id = *d.Options.ReceiptedMessageID
-	case !answer:
-		id = receiptField(d.ShortMessage, "id")
-	}
-
-	if id != "" {
-		return r.Store.SentJob(ctx, id)
-	}
-
-	if answer && d.Source.Addr != "" {
-		return r.Store.SentJobTo(ctx, "+"+strings.TrimPrefix(d.Source.Addr, "+"))
-	}
-
-	return db.Job{}, db.ErrNotFound
-}
-
-// answer records the card's answer to a job's command: its short_message is the Response Packet, with its user data
-// header when UDHI is set (TS 31.115 clause 4.1).
-func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM) error {
-	j, err := r.jobOf(ctx, d, true)
-	if errors.Is(err, db.ErrNotFound) {
-		r.Logger.Info("ignoring a SIM answer for no job in progress", slog.String("source", d.Source.Addr))
-		return nil
-	}
-
-	if err != nil {
-		return err
-	}
-
+// responsePacket is the user data of a deliver_sm, in short_message or else in message_payload (SMPP 3.4 section
+// 4.6.1), when it is a Response Packet: it starts with the Response Packet's user data header, whether or not UDHI
+// is set, since the card cannot have the ME set it (TS 31.115 clause 4.1).
+func responsePacket(d *smpp.DeliverSM) ([]byte, bool) {
 	sm := d.ShortMessage
 	if len(sm) == 0 {
 		sm = d.Options.MessagePayload
 	}
 
-	udh, ud := []byte(nil), sm
-	if d.ESMClass&ESMClassUDHI != 0 && len(sm) > 0 && int(sm[0]) < len(sm) {
-		udh, ud = sm[:1+int(sm[0])], sm[1+int(sm[0]):]
-	}
+	// RPL 2, RHL 1 and TAR 3 follow the header.
+	return sm, bytes.HasPrefix(sm, responseUDH) && len(sm) >= len(responseUDH)+6
+}
 
-	_, keyset, err := r.cardOf(ctx, j)
+// answer records a PoR, from the card of the deliver_sm's source, on the job whose last command it answers: the
+// Response Packet's TAR and CNTR are copies of the Command Packet's (TS 102 225 clause 5.2, table 3), so the PoR
+// answers the job of the card's number, of its TAR, whose last command had its counter, whether the job is sent or
+// was closed without a PoR, by a receipt or the deadline. receipted_message_id, which the SMSC may or may not set, is
+// not needed.
+//
+// An unsecured PoR, which a card that cannot authenticate the command answers, carries a zero counter (TS 102 225
+// clause 5.2): it can only be matched by number and TAR, so it is taken for the one job of that number and TAR in
+// flight, and left aside when there is none or more than one. A late unsecured PoR is not told apart from one for a
+// later command of the same TAR; it is then recorded on that command.
+func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM, packet []byte) error {
+	udh, ud := packet[:len(responseUDH)], packet[len(responseUDH):]
+	tar := ud[3:6]
+
+	candidates, err := r.Store.AwaitingPoR(ctx, "+"+strings.TrimPrefix(d.Source.Addr, "+"), tar)
 	if err != nil {
-		r.finish(ctx, noPoR(j, err.Error()))
-		return nil
+		return err
 	}
 
-	next, final := Outcome(j, keyset, udh, ud)
-	if final {
-		r.finish(ctx, next)
-		return nil
+	inFlight := 0
+
+	for _, j := range candidates {
+		if j.Status == db.JobSent {
+			inFlight++
+		}
 	}
 
-	if err := r.Store.AdvanceJob(ctx, next); err != nil {
-		return fmt.Errorf("advance job %d: %w", j.ID, err)
+	var decodeErr error
+
+	for _, j := range candidates {
+		card, err := r.Store.GetCard(ctx, j.ICCID)
+		if errors.Is(err, db.ErrNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("card %s: %w", j.ICCID, err)
+		}
+
+		keyset, ok := keysetOf(card, j.KVN)
+		if !ok {
+			if j.Status == db.JobSent && inFlight == 1 {
+				// The PoR of this card's command cannot be read: a configuration error, which a retry does not fix.
+				return r.finish(ctx, noPoR(j, fmt.Sprintf("the card has no key set %d to read its PoR", j.KVN)))
+			}
+
+			continue
+		}
+
+		resp, err := ota.DecodeResponse(keyset, SPI, udh, ud)
+		if err != nil {
+			decodeErr = err
+			continue
+		}
+
+		if resp.Unsecured && (j.Status != db.JobSent || inFlight != 1) || !resp.Unsecured && resp.Counter != j.Counter {
+			continue
+		}
+
+		if id := d.Options.ReceiptedMessageID; id != nil && *id != j.MessageID {
+			r.Logger.Debug("a PoR's receipted_message_id is not its command's message_id", slog.Int64("job", j.ID),
+				slog.String("receipted_message_id", *id), slog.String("message_id", j.MessageID))
+		}
+
+		return r.record(ctx, j, resp, packet)
 	}
 
-	r.Wake()
+	r.Logger.Info("ignoring a PoR that answers no job's command", slog.String("source", d.Source.Addr),
+		slog.String("tar", fmt.Sprintf("%x", tar)), slog.Any("error", decodeErr))
 
 	return nil
 }
 
-// receipt records the SMSC's final word on a job's message, which no SIM answer preceded: the SMSC sends the answer
-// first. Its message_state, or the stat of its text (SMPP 3.4 appendix B), tells whether the message was delivered.
+// record records the PoR of a job's last command: on a sent job, its outcome or next command; on a job closed
+// without a PoR, the outcome that replaces the one given without it, or its next command when its card has no other
+// job in progress.
+func (r *Runner) record(ctx context.Context, j db.Job, resp ota.Response, packet []byte) error {
+	next, final := Outcome(j, resp, packet)
+
+	if j.Status == db.JobSent {
+		if final {
+			return r.finish(ctx, next)
+		}
+
+		if err := r.Store.AdvanceJob(ctx, next); err != nil && !errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("advance job %d: %w", j.ID, err)
+		}
+
+		r.Wake()
+
+		return nil
+	}
+
+	r.Logger.Info("a late PoR answers a job closed without it", slog.Int64("job", j.ID), slog.String("was", string(j.Status)))
+
+	if !final {
+		err := r.Store.ResumeJob(ctx, next)
+		if err == nil {
+			r.Wake()
+			return nil
+		}
+
+		if !errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("resume job %d: %w", j.ID, err)
+		}
+
+		next.Status = db.JobFailed
+		next.Error = fmt.Sprintf("a late PoR answered command %d, but the card has another job in progress", j.Step+1)
+	}
+
+	next.PoRMissing = false
+
+	if err := r.Store.ReviseJob(ctx, next); err != nil && !errors.Is(err, db.ErrNotFound) {
+		return fmt.Errorf("revise job %d: %w", j.ID, err)
+	}
+
+	r.logFinished(next)
+
+	return nil
+}
+
+// receipt records the SMSC's final word on a job's message, which the card's answer, if any, has not yet reached
+// (SMPP 3.4 section 2.11): the job closes without a PoR, which a PoR that comes later still replaces. Asked for with
+// registered_delivery 01, every receipt is final (section 5.2.17). It finds its job by receipted_message_id, which a
+// receipt should carry (table 4-18), else by the id of its text (appendix B); its message_state, else the stat of its
+// text, gives the reason.
 func (r *Runner) receipt(ctx context.Context, d *smpp.DeliverSM) error {
-	state, ok := receiptState(d)
-	if !ok {
-		r.Logger.Info("ignoring a receipt without a message state", slog.String("text", string(d.ShortMessage)))
+	id := receiptField(d.ShortMessage, "id")
+	if d.Options.ReceiptedMessageID != nil {
+		id = *d.Options.ReceiptedMessageID
+	}
+
+	if id == "" {
+		r.Logger.Info("ignoring a receipt without a message id", slog.String("text", string(d.ShortMessage)))
 		return nil
 	}
 
-	var reason string
-
-	switch state {
-	case smpp.StateDelivered:
-		reason = "delivered without a PoR: the card answers none to a sender it cannot authenticate, such as with " +
-			"other keys or key set; or the serving node passed none on"
-	case smpp.StateExpired:
-		reason = "message expired without a PoR"
-	case smpp.StateUndeliverable:
-		reason = "message undeliverable without a PoR"
-	case smpp.StateDeleted:
-		reason = "message deleted by the SMSC without a PoR"
-	case smpp.StateRejected:
-		reason = "message rejected by the SMSC without a PoR"
-	case smpp.StateUnknown:
-		reason = "message in an unknown state, without a PoR"
-	default:
-		// ENROUTE and ACCEPTED are not final (SMPP 3.4 section 5.2.28).
-		return nil
-	}
-
-	j, err := r.jobOf(ctx, d, false)
+	j, err := r.Store.SentJob(ctx, id)
 	if errors.Is(err, db.ErrNotFound) {
-		r.Logger.Debug("ignoring a receipt for no job in progress", slog.String("state", state.String()))
+		r.Logger.Debug("ignoring a receipt for no job in progress", slog.String("message", id))
 		return nil
 	}
 
@@ -497,13 +679,40 @@ func (r *Runner) receipt(ctx context.Context, d *smpp.DeliverSM) error {
 		return err
 	}
 
-	r.finish(ctx, noPoR(j, reason))
+	next := noPoR(j, receiptReason(d))
+	next.PoRMissing = true
 
-	return nil
+	return r.finish(ctx, next)
 }
 
-// receiptState is the message_state of a receipt (SMPP 3.4 section 5.3.2.35), or the one its text's stat names in the
-// format of SMPP 3.4 appendix B, table B-2.
+// receiptReason tells what a receipt says of its message.
+func receiptReason(d *smpp.DeliverSM) string {
+	state, ok := receiptState(d)
+	if !ok {
+		return "message in an unknown state, without a PoR"
+	}
+
+	switch state {
+	case smpp.StateDelivered:
+		return "delivered without a PoR: the card answers none to a sender it cannot authenticate, such as with other " +
+			"keys or key set; or the serving node passed none on"
+	case smpp.StateExpired:
+		return "message expired without a PoR"
+	case smpp.StateUndeliverable:
+		return "message undeliverable without a PoR"
+	case smpp.StateDeleted:
+		return "message deleted by the SMSC without a PoR"
+	case smpp.StateRejected:
+		return "message rejected by the SMSC without a PoR"
+	case smpp.StateAccepted:
+		return "message accepted on the subscriber's behalf, without a PoR"
+	default:
+		return fmt.Sprintf("message in state %s, without a PoR", state)
+	}
+}
+
+// receiptState is the message_state of a receipt (SMPP 3.4 section 5.3.2.35), or the one its text's stat names, of
+// the final states of SMPP 3.4 appendix B, table B-2.
 func receiptState(d *smpp.DeliverSM) (smpp.MessageState, bool) {
 	if s := d.Options.MessageState; s != nil {
 		return *s, true
@@ -512,7 +721,7 @@ func receiptState(d *smpp.DeliverSM) (smpp.MessageState, bool) {
 	states := map[string]smpp.MessageState{
 		"DELIVRD": smpp.StateDelivered, "EXPIRED": smpp.StateExpired, "DELETED": smpp.StateDeleted,
 		"UNDELIV": smpp.StateUndeliverable, "ACCEPTD": smpp.StateAccepted, "UNKNOWN": smpp.StateUnknown,
-		"REJECTD": smpp.StateRejected, "ENROUTE": smpp.StateEnroute,
+		"REJECTD": smpp.StateRejected,
 	}
 
 	s, ok := states[receiptField(d.ShortMessage, "stat")]
@@ -551,25 +760,15 @@ func writes(j db.Job) bool {
 	return j.Operation == db.OperationOPLMNSet || j.Operation == db.OperationOPLMNClear
 }
 
-// Outcome decodes the answer of a card to job j's current command, from the user data of its delivery report: the
-// job with the next command to send, or final.
-func Outcome(j db.Job, k ota.Keyset, udh, ud []byte) (db.Job, bool) {
-	j.Response = append(append([]byte{}, udh...), ud...)
-	j.Warning = false
+// Outcome is job j after the PoR r, of user data packet, that answers its last command: the job with the next command
+// to send, or final.
+func Outcome(j db.Job, r ota.Response, packet []byte) (db.Job, bool) {
+	j.Response = append([]byte{}, packet...)
+	j.Warning, j.Error = false, ""
 
 	fail := func(status db.JobStatus, format string, a ...any) (db.Job, bool) {
 		j.Status, j.Error = status, fmt.Sprintf(format, a...)
 		return j, true
-	}
-
-	r, err := ota.DecodeResponse(k, SPI, udh, ud)
-	if err != nil {
-		return fail(db.JobFailed, "invalid PoR: %v", err)
-	}
-
-	// The PoR's TAR, and CNTR when secured, are copies of the command's (TS 102 225 clause 5.2, table 3).
-	if !bytes.Equal(r.TAR[:], j.TAR) || !r.Unsecured && r.Counter != j.Counter {
-		return fail(db.JobFailed, "PoR for TAR %x and counter %d, not this command's", r.TAR, r.Counter)
 	}
 
 	j.PoRStatus, j.StatusWord = int(r.Status), -1
@@ -729,17 +928,32 @@ func entryOf(j db.Job) ([]byte, error) {
 	return e.Encode()
 }
 
+// fail fails a queued job, for the runner, which logs a failure to store it: the job stays queued and is tried again.
 func (r *Runner) fail(ctx context.Context, j db.Job, reason string) {
 	j.Status, j.Error = db.JobFailed, reason
-	r.finish(ctx, j)
+	if err := r.finish(ctx, j); err != nil {
+		r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
+	}
 }
 
-func (r *Runner) finish(ctx context.Context, j db.Job) {
-	if err := r.Store.FinishJob(ctx, j); err != nil {
-		r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
-		return
+// finish records the outcome of a job in progress. A job already closed, by an earlier copy of the same deliver_sm
+// for one, is not an error.
+func (r *Runner) finish(ctx context.Context, j db.Job) error {
+	err := r.Store.FinishJob(ctx, j)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil
 	}
 
+	if err != nil {
+		return fmt.Errorf("finish job %d: %w", j.ID, err)
+	}
+
+	r.logFinished(j)
+
+	return nil
+}
+
+func (r *Runner) logFinished(j db.Job) {
 	r.Logger.Info("job finished", slog.Int64("job", j.ID), slog.String("iccid", j.ICCID), slog.String("status", string(j.Status)),
 		slog.String("error", j.Error))
 }

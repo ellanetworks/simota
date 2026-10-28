@@ -1,5 +1,5 @@
 // Command simota is a minimal SIM OTA platform: it keeps cards and their OTA keys, and runs Remote File Management
-// jobs on them through Ella SMSC.
+// jobs on them through an SMSC, such as Ella SMSC, as an SMPP 3.4 client.
 package main
 
 import (

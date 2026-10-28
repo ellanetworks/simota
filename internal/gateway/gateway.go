@@ -1,4 +1,4 @@
-// Package gateway keeps simota's SMPP 3.4 session to Ella SMSC: one transceiver bind per process (SMPP 3.4 section
+// Package gateway keeps simota's SMPP 3.4 session to the SMSC, such as Ella SMSC: one transceiver bind per process (SMPP 3.4 section
 // 2.2), bound again with a backoff whenever it is lost, with the SMSC settings as set.
 package gateway
 
@@ -62,13 +62,9 @@ func (s State) Bound() bool { return s.Status == StatusBound }
 type Config struct {
 	// Handler handles the SMSC's deliver_sm: delivery receipts and SIM answers.
 	Handler smpp.Handler
-	// Session sets the SMPP timers and windows; zero values take smpp's defaults.
-	Session smpp.SessionConfig
 	// MinBackoff and MaxBackoff bound the wait before binding again; zero values take smpp's defaults.
 	MinBackoff, MaxBackoff time.Duration
-	// TLS is the base TLS configuration of a TLS connection; nil is the system's roots, TLS 1.2 at least.
-	TLS    *tls.Config
-	Logger *slog.Logger
+	Logger                 *slog.Logger
 }
 
 // Gateway is the session to the SMSC. It is safe for concurrent use.
@@ -127,13 +123,10 @@ func (g *Gateway) Apply(s *Settings) error {
 }
 
 func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
+	// A TLS connection verifies the SMSC's certificate against the system's roots.
 	var tlsConfig *tls.Config
-
 	if s.TLS {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-		if g.cfg.TLS != nil {
-			tlsConfig = g.cfg.TLS.Clone()
-		}
 	}
 
 	return smpp.NewClient(smpp.ClientConfig{
@@ -143,7 +136,6 @@ func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
 			ID: smpp.CmdBindTransceiver, SystemID: s.SystemID, Password: s.Password,
 			InterfaceVersion: smpp.InterfaceVersion,
 		},
-		Session:    g.cfg.Session,
 		Handler:    g.cfg.Handler,
 		MinBackoff: g.cfg.MinBackoff,
 		MaxBackoff: g.cfg.MaxBackoff,

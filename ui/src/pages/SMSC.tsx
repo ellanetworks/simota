@@ -43,7 +43,7 @@ export default function SMSC() {
       <PageHeader
         id="smsc-title"
         title="SMSC"
-        description="The Ella SMSC that sends the commands to the cards over SMPP, and pushes back their answers."
+        description="The SMSC, such as Ella SMSC, that sends the commands to the cards over SMPP, and pushes back their answers."
         action={
           // The settings are set together, in one dialog.
           <Button
@@ -63,7 +63,7 @@ export default function SMSC() {
         rows={[
           {
             label: "Host",
-            help: "The host of Ella SMSC's SMPP listener.",
+            help: "The host of the SMSC's SMPP listener.",
             value: data && orNotSet(data.host),
           },
           {
@@ -78,7 +78,7 @@ export default function SMSC() {
           },
           {
             label: "System ID",
-            help: "The system_id of simota's ESME account on Ella SMSC.",
+            help: "The system_id of simota's ESME account on the SMSC.",
             value: data && orNotSet(data.system_id),
           },
           {

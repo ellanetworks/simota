@@ -67,7 +67,7 @@ func TestSMSC(t *testing.T) {
 	got := smscResult(t, body)
 	if code != http.StatusOK || got["host"] != "" || got["port"] != 2775.0 || got["password_set"] != false ||
 		got["validity_seconds"] != 86400.0 || got["bind"].(map[string]any)["status"] != "unset" ||
-		got["bind"].(map[string]any)["bound"] != false {
+		got["bind"].(map[string]any)["bound"] != nil {
 		t.Fatalf("unset = %d %s", code, body)
 	}
 
@@ -120,7 +120,7 @@ func TestSMSC(t *testing.T) {
 	}
 
 	_, body = e.do(t, http.MethodGet, "/api/v1/smsc", "", "")
-	if b := smscResult(t, body)["bind"].(map[string]any); b["bound"] != false || b["status"] != "disconnected" ||
+	if b := smscResult(t, body)["bind"].(map[string]any); b["bound"] != nil || b["status"] != "disconnected" ||
 		!strings.Contains(b["last_error"].(string), "ESME_RBINDFAIL") || b["last_error_at"] != "2026-10-28T12:00:00Z" {
 		t.Fatalf("disconnected = %s", body)
 	}
@@ -128,7 +128,7 @@ func TestSMSC(t *testing.T) {
 	e.gateway.state = gateway.State{Status: gateway.StatusBound, Since: at, SystemID: "EllaSMSC"}
 
 	_, body = e.do(t, http.MethodGet, "/api/v1/smsc", "", "")
-	if b := smscResult(t, body)["bind"].(map[string]any); b["bound"] != true || b["status"] != "bound" ||
+	if b := smscResult(t, body)["bind"].(map[string]any); b["bound"] != nil || b["status"] != "bound" ||
 		b["smsc_system_id"] != "EllaSMSC" || b["since"] != "2026-10-28T12:00:00Z" || b["last_error"] != nil {
 		t.Fatalf("bound = %s", body)
 	}
@@ -156,12 +156,18 @@ func TestSMSCRejects(t *testing.T) {
 		strings.Replace(smscBody, `"secret"`, `"sécret"`, 1),
 		strings.Replace(smscBody, "+15550001000", "15550001000", 1),
 		strings.Replace(smscBody, "86400", "0", 1),
-		strings.Replace(smscBody, "86400", "38102401", 1),
+		// L3: at most 99 days, so that the relative validity_period stays normalised.
+		strings.Replace(smscBody, "86400", "8553601", 1),
 		strings.Replace(smscBody, `"validity_seconds"`, `"url":"http://x","validity_seconds"`, 1),
 	} {
 		if code, b := e.do(t, http.MethodPut, "/api/v1/smsc", "application/json", body); code != http.StatusBadRequest {
 			t.Fatalf("%s = %d %s, want 400", body, code, b)
 		}
+	}
+
+	if code, b := e.do(t, http.MethodPut, "/api/v1/smsc", "application/json",
+		strings.Replace(smscBody, "86400", "8553600", 1)); code != http.StatusOK {
+		t.Fatalf("validity of 99 days = %d %s", code, b)
 	}
 
 	// An IPv6 address and a host name are hosts.

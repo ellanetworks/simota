@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/ellanetworks/simota/internal/db"
 	"github.com/ellanetworks/simota/internal/gateway"
+	"github.com/ellanetworks/simota/internal/jobs"
 )
 
 const (
@@ -40,7 +42,6 @@ type SMSCSettings struct {
 
 // BindState is simota's SMPP session to the SMSC.
 type BindState struct {
-	Bound bool `json:"bound"`
 	// Status is unset, connecting, bound or disconnected, since Since.
 	Status   string    `json:"status"`
 	Since    time.Time `json:"since"`
@@ -130,7 +131,7 @@ func UpdateSMSC(cfg Config) http.Handler {
 			bad("originator must be E.164, such as +15550001000")
 			return
 		case p.ValiditySeconds < 1 || p.ValiditySeconds > maxValiditySeconds:
-			bad("validity_seconds must be between 1 and 38102400")
+			bad(fmt.Sprintf("validity_seconds must be between 1 and %d (99 days)", maxValiditySeconds))
 			return
 		}
 
@@ -170,8 +171,9 @@ func UpdateSMSC(cfg Config) http.Handler {
 	})
 }
 
-// maxValiditySeconds is the longest validity period an SMS-SUBMIT can tell, 63 weeks (TS 23.040 clause 9.2.3.12.1).
-const maxValiditySeconds = 63 * 7 * 24 * 60 * 60
+// maxValiditySeconds is the longest validity, 99 days: the most that simota's relative validity_period tells (SMPP
+// 3.4 section 7.1.1.2), which an SMSC may limit further (section 7.1.1.2, note).
+const maxValiditySeconds = int64(jobs.MaxValidity / time.Second)
 
 func bindState(cfg Config) BindState {
 	if cfg.Gateway == nil {
@@ -179,7 +181,7 @@ func bindState(cfg Config) BindState {
 	}
 
 	st := cfg.Gateway.State()
-	b := BindState{Bound: st.Bound(), Status: string(st.Status), Since: st.Since.UTC(), SystemID: st.SystemID, LastError: st.LastError}
+	b := BindState{Status: string(st.Status), Since: st.Since.UTC(), SystemID: st.SystemID, LastError: st.LastError}
 
 	if !st.LastErrorAt.IsZero() {
 		b.LastErrorAt = new(st.LastErrorAt.UTC())

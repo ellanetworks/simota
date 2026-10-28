@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// SMSC is the Ella SMSC that the OTA messages go through, over SMPP 3.4: its host and port, whether the connection
+// SMSC is the SMSC that the OTA messages go through, over SMPP 3.4: its host and port, whether the connection
 // is over TLS, the system_id and password that simota binds with, the address the messages come from, and how long
 // the SMSC attempts their delivery.
 type SMSC struct {

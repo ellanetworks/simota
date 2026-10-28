@@ -70,12 +70,12 @@ describe("validitySeconds", () => {
     ["1", 3600],
     ["1.5", 5400],
     ["0.0003", 1],
-    ["10584", 38102400],
+    ["2376", 8553600],
   ])("reads %s hours as %i seconds", (hours, seconds) => {
     expect(validitySeconds(hours)).toBe(seconds);
   });
 
-  it.each(["", "0", "0.0001", "10584.001", "-1", "1h", "abc", "1e3"])(
+  it.each(["", "0", "0.0001", "2376.001", "-1", "1h", "abc", "1e3"])(
     "rejects %j",
     (v) => {
       expect(validitySeconds(v)).toBeUndefined();
@@ -87,7 +87,7 @@ describe("validityHours", () => {
   it("shows seconds as hours", () => {
     expect(validityHours(86400)).toBe("24");
     expect(validityHours(5400)).toBe("1.5");
-    expect(validityHours(38102400)).toBe("10584");
+    expect(validityHours(8553600)).toBe("2376");
     expect(validitySeconds(validityHours(1))).toBe(1);
   });
 });

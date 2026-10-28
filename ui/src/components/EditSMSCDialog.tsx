@@ -78,7 +78,7 @@ export default function EditSMSCDialog({
       : "E.164, e.g. +15550000000";
   const validityError =
     validitySeconds(validity) === undefined
-      ? `1 second to ${MAX_VALIDITY_HOURS} hours (63 weeks).`
+      ? `1 second to ${MAX_VALIDITY_HOURS} hours (99 days).`
       : undefined;
 
   const valid =
@@ -104,7 +104,7 @@ export default function EditSMSCDialog({
         value={host}
         onChange={(e) => setHost(e.target.value.trim())}
         error={hostError !== undefined}
-        helperText={hostError ?? "The host of Ella SMSC's SMPP listener."}
+        helperText={hostError ?? "The host of the SMSC's SMPP listener."}
         placeholder="127.0.0.1"
         required
         autoFocus
@@ -130,8 +130,7 @@ export default function EditSMSCDialog({
         onChange={(e) => setSystemID(e.target.value.trim())}
         error={systemIDError !== undefined}
         helperText={
-          systemIDError ??
-          "The system_id of simota's ESME account on Ella SMSC."
+          systemIDError ?? "The system_id of simota's ESME account on the SMSC."
         }
         required
       />

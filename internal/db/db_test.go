@@ -301,26 +301,41 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("sent job before it is sent = %v", err)
 	}
 
-	if err := d.MarkJobSent(ctx, j.ID, 7, "55", []byte{1}); err != nil {
+	expires := time.UnixMilli(time.Now().Add(time.Hour).UnixMilli())
+	if err := d.MarkJobSent(ctx, j.ID, 7, "55", []byte{1}, expires); err != nil {
 		t.Fatal(err)
 	}
 
 	j, _ = d.GetJob(ctx, j.ID)
-	if j.Status != db.JobSent || j.Counter != 7 || j.MessageID != "55" || !bytes.Equal(j.TAR, []byte{0xb0, 0x00, 0x10}) {
+	if j.Status != db.JobSent || j.Counter != 7 || j.MessageID != "55" || !bytes.Equal(j.TAR, []byte{0xb0, 0x00, 0x10}) ||
+		!j.ExpiresAt.Equal(expires) {
 		t.Fatalf("sent = %+v", j)
 	}
 
-	// The SMSC's deliver_sm finds the job by its message_id, or by the card's MSISDN.
+	// A receipt finds the job by its message_id; a PoR by the card's MSISDN and the job's TAR.
 	if got, err := d.SentJob(ctx, "55"); err != nil || got.ID != j.ID {
 		t.Fatalf("SentJob = %+v, %v", got, err)
 	}
 
-	if got, err := d.SentJobTo(ctx, c.MSISDN); err != nil || got.ID != j.ID {
-		t.Fatalf("SentJobTo(%s) = %+v, %v", c.MSISDN, got, err)
+	if got, err := d.AwaitingPoR(ctx, c.MSISDN, j.TAR); err != nil || len(got) != 1 || got[0].ID != j.ID {
+		t.Fatalf("AwaitingPoR(%s) = %+v, %v", c.MSISDN, got, err)
 	}
 
-	if _, err := d.SentJobTo(ctx, "+15559999999"); !errors.Is(err, db.ErrNotFound) {
-		t.Fatalf("SentJobTo another number = %v", err)
+	for _, k := range []struct {
+		msisdn string
+		tar    []byte
+	}{{"+15559999999", j.TAR}, {c.MSISDN, c.TAR}} {
+		if got, err := d.AwaitingPoR(ctx, k.msisdn, k.tar); err != nil || len(got) != 0 {
+			t.Fatalf("AwaitingPoR(%s, %x) = %+v, %v", k.msisdn, k.tar, got, err)
+		}
+	}
+
+	// The sweep closes the job only while its command is still the one of its counter.
+	stale := j
+	stale.Counter, stale.Status, stale.Error = 6, db.JobFailed, "no PoR"
+
+	if err := d.ExpireJob(ctx, stale); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("expire with another counter = %v", err)
 	}
 
 	j.Step, j.FileSize, j.PoRStatus, j.StatusWord, j.Response = 1, 60, 0, 0x9000, []byte{2}
@@ -337,14 +352,67 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("advanced = %+v", j)
 	}
 
-	j.Status, j.Error = db.JobUnconfirmed, "no PoR"
+	// A job closed without its PoR still awaits it, and a late PoR revises it.
+	j.Status, j.Error, j.PoRMissing = db.JobUnconfirmed, "no PoR", true
 	if err := d.FinishJob(ctx, j); err != nil {
 		t.Fatal(err)
 	}
 
 	j, _ = d.GetJob(ctx, j.ID)
-	if j.Status != db.JobUnconfirmed || j.Error != "no PoR" {
+	if j.Status != db.JobUnconfirmed || j.Error != "no PoR" || !j.PoRMissing {
 		t.Fatalf("finished = %+v", j)
+	}
+
+	if got, err := d.AwaitingPoR(ctx, c.MSISDN, j.TAR); err != nil || len(got) != 1 {
+		t.Fatalf("AwaitingPoR of a job closed without its PoR = %+v, %v", got, err)
+	}
+
+	// Resuming needs the card to have no other job in progress.
+	other, err := d.CreateJobs(ctx, []db.Job{{ICCID: c.ICCID, Operation: db.OperationOPLMNRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.ResumeJob(ctx, j); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("resume while the card is busy = %v", err)
+	}
+
+	o, _ := d.GetJob(ctx, other[0])
+	o.Status = db.JobFailed
+
+	if err := d.FinishJob(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+
+	j.Step = 2
+	if err := d.ResumeJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := d.GetJob(ctx, j.ID); got.Status != db.JobQueued || got.Step != 2 || got.PoRMissing || got.Error != "" {
+		t.Fatalf("resumed = %+v", got)
+	}
+
+	if err := d.MarkJobSent(ctx, j.ID, 8, "56", []byte{1}, expires); err != nil {
+		t.Fatal(err)
+	}
+
+	j.Status, j.Error, j.PoRMissing = db.JobFailed, "no PoR", true
+	if err := d.FinishJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	j.Counter, j.Status, j.Error, j.PoRMissing = 8, db.JobSucceeded, "", false
+	if err := d.ReviseJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.ReviseJob(ctx, j); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("revise twice = %v", err)
+	}
+
+	if got, _ := d.GetJob(ctx, j.ID); got.Status != db.JobSucceeded || got.PoRMissing {
+		t.Fatalf("revised = %+v", got)
 	}
 
 	if _, err := d.CreateJobs(ctx, []db.Job{{ICCID: "8988211000000000025", Operation: db.OperationOPLMNRead}}); !errors.Is(err, db.ErrNotFound) {

@@ -5,7 +5,6 @@ export type BindStatus = "unset" | "connecting" | "bound" | "disconnected";
 
 // BindState is simota's transceiver session to the SMSC, bound again whenever it is lost.
 export interface BindState {
-  bound: boolean;
   status: BindStatus;
   // since is when the session entered its status.
   since: string;
@@ -16,7 +15,7 @@ export interface BindState {
   last_error_at?: string;
 }
 
-// SMSC is the Ella SMSC that OTA messages go through over SMPP 3.4. Its password is write-only.
+// SMSC is the SMSC, such as Ella SMSC, that OTA messages go through over SMPP 3.4. Its password is write-only.
 export interface SMSC {
   // host is empty while the SMSC is unset.
   host: string;

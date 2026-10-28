@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -50,7 +51,7 @@ func aesKeyset(t *testing.T) ota.Keyset {
 	}
 }
 
-// fakeSMSC is Ella SMSC as the runner meets it over SMPP 3.4: a server on a loopback port that the runner's session
+// fakeSMSC is an SMSC as the runner meets it over SMPP 3.4: a server on a loopback port that the runner's session
 // binds to as a transceiver, which answers each submit_sm with the next message_id, or with the status the test sets,
 // and sends the deliver_sm the test makes it send.
 type fakeSMSC struct {
@@ -124,22 +125,91 @@ func (f *fakeSMSC) sent() []*smpp.SubmitSM {
 func (f *fakeSMSC) deliver(t *testing.T, d *smpp.DeliverSM) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if _, err := f.srv.Deliver(ctx, "simota", d); err != nil {
+	if err := f.try(d); err != nil {
 		t.Fatalf("deliver_sm: %v", err)
 	}
 }
 
+// try sends a deliver_sm and returns the error of its deliver_sm_resp: a *smpp.StatusError for a status other than
+// ESME_ROK.
+func (f *fakeSMSC) try(d *smpp.DeliverSM) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := f.srv.Deliver(ctx, "simota", d)
+
+	return err
+}
+
+// faultyStore is the store with the failures a test sets.
+type faultyStore struct {
+	*db.DB
+
+	mu                     sync.Mutex
+	finish, card, markSent error
+}
+
+func (s *faultyStore) set(f func(s *faultyStore)) {
+	s.mu.Lock()
+	f(s)
+	s.mu.Unlock()
+}
+
+func (s *faultyStore) fault(e *error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return *e
+}
+
+func (s *faultyStore) FinishJob(ctx context.Context, j db.Job) error {
+	if err := s.fault(&s.finish); err != nil {
+		return err
+	}
+
+	return s.DB.FinishJob(ctx, j)
+}
+
+func (s *faultyStore) GetCard(ctx context.Context, iccid string) (db.Card, error) {
+	if err := s.fault(&s.card); err != nil {
+		return db.Card{}, err
+	}
+
+	return s.DB.GetCard(ctx, iccid)
+}
+
+func (s *faultyStore) MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte, expiresAt time.Time) error {
+	if err := s.fault(&s.markSent); err != nil {
+		return err
+	}
+
+	return s.DB.MarkJobSent(ctx, id, counter, messageID, command, expiresAt)
+}
+
+var errDB = errors.New("database is locked")
+
 type env struct {
 	store  *db.DB
+	faults *faultyStore
 	smsc   *fakeSMSC
 	gw     *gateway.Gateway
 	runner *jobs.Runner
 	keyset ota.Keyset
 	msisdn string
 	now    time.Time
+	// validity is the gateway's.
+	validity time.Duration
+	settings gateway.Settings
+	// generic makes the SMSC forward the card's answer as pySim-smpp2sim does, a normal message without UDHI or TLVs,
+	// and send no receipt; otherwise as Ella SMSC does, an SME Manual/User Acknowledgement with UDHI and
+	// receipted_message_id, then a receipt.
+	generic bool
+}
+
+// forms runs a test with the SIM answers of both forms.
+func forms(t *testing.T, run func(t *testing.T, generic bool)) {
+	t.Run("ella", func(t *testing.T) { run(t, false) })
+	t.Run("generic", func(t *testing.T) { run(t, true) })
 }
 
 func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
@@ -163,19 +233,33 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	}
 
 	f, port := newFakeSMSC(t)
-	e := &env{store: store, smsc: f, keyset: k, msisdn: msisdn, now: time.Now()}
+	e := &env{
+		store: store, faults: &faultyStore{DB: store}, smsc: f, keyset: k, msisdn: msisdn, now: time.Now(),
+		validity: 24 * time.Hour,
+	}
 
-	e.runner = jobs.NewRunner(store, func(context.Context) (jobs.Gateway, error) {
-		return jobs.Gateway{SMSC: e.gw, Originator: "+15550001000", Validity: 24 * time.Hour}, nil
+	e.runner = jobs.NewRunner(e.faults, func(context.Context) (jobs.Gateway, error) {
+		return jobs.Gateway{SMSC: e.gw, Originator: "+15550001000", Validity: e.validity}, nil
 	}, time.Hour, slog.New(slog.DiscardHandler))
 	e.runner.Now = func() time.Time { return e.now }
 
+	e.settings = gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "secret"}
 	e.gw = gateway.New(gateway.Config{Handler: e.runner, MinBackoff: 10 * time.Millisecond, MaxBackoff: 50 * time.Millisecond})
-	if err := e.gw.Apply(&gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "secret"}); err != nil {
-		t.Fatal(err)
-	}
 
 	t.Cleanup(func() { _ = e.gw.Close(context.Background()) })
+
+	e.rebind(t)
+
+	return e
+}
+
+// rebind binds the session to the SMSC and waits until it is bound.
+func (e *env) rebind(t *testing.T) {
+	t.Helper()
+
+	if err := e.gw.Apply(new(e.settings)); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -183,8 +267,6 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	if err := e.gw.WaitBound(ctx); err != nil {
 		t.Fatalf("not bound: %v, %+v", err, e.gw.State())
 	}
-
-	return e
 }
 
 func (e *env) queue(t *testing.T, j db.Job) int64 {
@@ -211,20 +293,25 @@ func (e *env) job(t *testing.T, id int64) db.Job {
 	return j
 }
 
-// simAnswer is the deliver_sm by which Ella SMSC forwards a card's PoR to the job's message: an SME Manual/User
-// Acknowledgement with UDHI, the PoR with its user data header, and the message_id as receipted_message_id.
+// simAnswer is the deliver_sm by which the SMSC forwards a card's PoR, with its user data header, to the job's
+// message. Ella SMSC sends an SME Manual/User Acknowledgement with UDHI and the message_id as receipted_message_id;
+// pySim-smpp2sim a normal message without UDHI or TLVs.
 func (e *env) simAnswer(j db.Job, packet []byte) *smpp.DeliverSM {
 	d := &smpp.DeliverSM{Message: smpp.Message{
 		Source:      smpp.Address{TON: 1, NPI: 1, Addr: strings.TrimPrefix(e.msisdn, "+")},
 		Destination: smpp.Address{TON: 1, NPI: 1, Addr: "15550001000"},
-		ESMClass:    0x50, ProtocolID: 0x7f, DataCoding: 0xf6, ShortMessage: packet,
+		ESMClass:    0x00, ProtocolID: 0x7f, DataCoding: 0xf6, ShortMessage: packet,
 	}}
-	d.Options.ReceiptedMessageID = new(j.MessageID)
+
+	if !e.generic {
+		d.ESMClass = 0x50
+		d.Options.ReceiptedMessageID = new(j.MessageID)
+	}
 
 	return d
 }
 
-// receipt is Ella SMSC's delivery receipt for the job's message (SMPP 3.4 section 2.11, appendix B).
+// receipt is the SMSC's delivery receipt for the job's message (SMPP 3.4 section 2.11, appendix B).
 func (e *env) receipt(j db.Job, state smpp.MessageState) *smpp.DeliverSM {
 	d := &smpp.DeliverSM{Message: smpp.Message{
 		Source:      smpp.Address{TON: 1, NPI: 1, Addr: strings.TrimPrefix(e.msisdn, "+")},
@@ -241,7 +328,7 @@ func (e *env) receipt(j db.Job, state smpp.MessageState) *smpp.DeliverSM {
 
 var stat = map[smpp.MessageState]string{
 	smpp.StateDelivered: "DELIVRD", smpp.StateExpired: "EXPIRED", smpp.StateUndeliverable: "UNDELIV",
-	smpp.StateDeleted: "DELETED", smpp.StateRejected: "REJECTD", smpp.StateEnroute: "ENROUTE",
+	smpp.StateDeleted: "DELETED", smpp.StateRejected: "REJECTD", smpp.StateAccepted: "ACCEPTD",
 }
 
 // por is the PoR of the card to the job's current command, with status and the compact response data.
@@ -249,8 +336,16 @@ func (e *env) por(t *testing.T, id int64, status ota.Status, data string) []byte
 	t.Helper()
 
 	j := e.job(t, id)
-	r := ota.Response{Counter: j.Counter, Status: status, Data: mustHex(t, data)}
-	copy(r.TAR[:], j.TAR)
+
+	return e.porOf(t, j.TAR, j.Counter, status, data)
+}
+
+// porOf is a PoR of the card for TAR tar and counter counter.
+func (e *env) porOf(t *testing.T, tar []byte, counter uint64, status ota.Status, data string) []byte {
+	t.Helper()
+
+	r := ota.Response{Counter: counter, Status: status, Data: mustHex(t, data)}
+	copy(r.TAR[:], tar)
 
 	udh, ud, err := ota.EncodeResponse(e.keyset, jobs.SPI, r)
 	if err != nil {
@@ -260,14 +355,17 @@ func (e *env) por(t *testing.T, id int64, status ota.Status, data string) []byte
 	return append(udh, ud...)
 }
 
-// answer makes the SMSC deliver the job's current command and forward the card's PoR, then its receipt DELIVRD, in
-// that order, as Ella SMSC does.
+// answer makes the SMSC deliver the job's current command and forward the card's PoR, then, as Ella SMSC does, its
+// receipt DELIVRD.
 func (e *env) answer(t *testing.T, id int64, status ota.Status, data string) {
 	t.Helper()
 
 	j := e.job(t, id)
 	e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, status, data)))
-	e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+
+	if !e.generic {
+		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+	}
 }
 
 func (e *env) step() {
@@ -280,85 +378,91 @@ func fcp(size int) string {
 }
 
 func TestRead(t *testing.T) {
-	e := newEnv(t, "+15550000001", sja5(t))
-	id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+	forms(t, func(t *testing.T, generic bool) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		e.generic = generic
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
-	e.step()
+		e.step()
 
-	j := e.job(t, id)
-	if j.Status != db.JobSent || j.Step != 0 || j.Counter != 1 || j.MessageID != "1" {
-		t.Fatalf("after sending the FCP command, job = %+v", j)
-	}
+		j := e.job(t, id)
+		if j.Status != db.JobSent || j.Step != 0 || j.Counter != 1 || j.MessageID != "1" {
+			t.Fatalf("after sending the FCP command, job = %+v", j)
+		}
 
-	// The submit_sm of SMPP 3.4 section 4.4.1: international E.164 addresses, UDHI, PID 7F, class 2 8-bit, a relative
-	// validity of a day, a receipt and the SME Manual/User Acknowledgement asked for, the command packet behind its
-	// user data header.
-	b := e.smsc.sent()[0]
-	if b.Source != (smpp.Address{TON: 1, NPI: 1, Addr: "15550001000"}) || b.Destination != (smpp.Address{TON: 1, NPI: 1, Addr: "15550000001"}) ||
-		b.ESMClass != 0x40 || b.ProtocolID != 0x7f || b.DataCoding != 0xf6 || b.RegisteredDelivery != 0x09 ||
-		b.ValidityPeriod != "000001000000000R" || b.ScheduleDeliveryTime != "" || !bytes.HasPrefix(b.ShortMessage, []byte{2, 0x70, 0}) ||
-		!bytes.Equal(b.ShortMessage, j.Command) {
-		t.Fatalf("submitted %+v", b)
-	}
+		// The submit_sm of SMPP 3.4 section 4.4.1: international E.164 addresses, UDHI, PID 7F, class 2 8-bit, a relative
+		// validity of a day, a receipt and the SME Manual/User Acknowledgement asked for, the command packet behind its
+		// user data header.
+		b := e.smsc.sent()[0]
+		if b.Source != (smpp.Address{TON: 1, NPI: 1, Addr: "15550001000"}) || b.Destination != (smpp.Address{TON: 1, NPI: 1, Addr: "15550000001"}) ||
+			b.ESMClass != 0x40 || b.ProtocolID != 0x7f || b.DataCoding != 0xf6 || b.RegisteredDelivery != 0x09 ||
+			b.ValidityPeriod != "000001000000000R" || b.ScheduleDeliveryTime != "" || !bytes.HasPrefix(b.ShortMessage, []byte{2, 0x70, 0}) ||
+			!bytes.Equal(b.ShortMessage, j.Command) {
+			t.Fatalf("submitted %+v", b)
+		}
 
-	// A pending message leaves the job sent.
-	e.step()
+		// A pending message leaves the job sent.
+		e.step()
 
-	if j := e.job(t, id); j.Status != db.JobSent || len(e.smsc.sent()) != 1 {
-		t.Fatalf("while pending, job = %+v", j)
-	}
+		if j := e.job(t, id); j.Status != db.JobSent || len(e.smsc.sent()) != 1 {
+			t.Fatalf("while pending, job = %+v", j)
+		}
 
-	e.answer(t, id, ota.StatusPoROK, fcp(60))
-	e.step()
+		e.answer(t, id, ota.StatusPoROK, fcp(60))
+		e.step()
 
-	j = e.job(t, id)
-	if j.Status != db.JobSent || j.Step != 1 || j.FileSize != 60 || j.Counter != 2 || len(e.smsc.sent()) != 2 {
-		t.Fatalf("after the FCP, job = %+v", j)
-	}
+		j = e.job(t, id)
+		if j.Status != db.JobSent || j.Step != 1 || j.FileSize != 60 || j.Counter != 2 || len(e.smsc.sent()) != 2 {
+			t.Fatalf("after the FCP, job = %+v", j)
+		}
 
-	file := "00f110ffff" + strings.Repeat("ffffff0000", 11)
-	e.answer(t, id, ota.StatusPoROK, "02"+"9000"+file)
-	e.step()
+		file := "00f110ffff" + strings.Repeat("ffffff0000", 11)
+		e.answer(t, id, ota.StatusPoROK, "02"+"9000"+file)
+		e.step()
 
-	j = e.job(t, id)
-	if j.Status != db.JobSucceeded || hex.EncodeToString(j.Data) != file || j.StatusWord != 0x9000 || j.PoRStatus != 0 {
-		t.Fatalf("job = %+v", j)
-	}
+		j = e.job(t, id)
+		if j.Status != db.JobSucceeded || hex.EncodeToString(j.Data) != file || j.StatusWord != 0x9000 || j.PoRStatus != 0 {
+			t.Fatalf("job = %+v", j)
+		}
+	})
 }
 
 // TestReadLargeFile reads 255 octets in chunks that each fit a PoR.
 func TestReadLargeFile(t *testing.T) {
-	e := newEnv(t, "+15550000001", sja5(t))
-	id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+	forms(t, func(t *testing.T, generic bool) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		e.generic = generic
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
-	e.step()
-	e.answer(t, id, ota.StatusPoROK, fcp(255))
-	e.step()
-
-	var file []byte
-
-	for i, n := range []int{125, 125, 5} {
-		chunk := bytes.Repeat([]byte{byte(i + 1)}, n)
-		file = append(file, chunk...)
-		e.answer(t, id, ota.StatusPoROK, "02"+"9000"+hex.EncodeToString(chunk))
 		e.step()
-	}
+		e.answer(t, id, ota.StatusPoROK, fcp(255))
+		e.step()
 
-	j := e.job(t, id)
-	if j.Status != db.JobSucceeded || !bytes.Equal(j.Data, file) || len(e.smsc.sent()) != 4 || j.Counter != 4 {
-		t.Fatalf("job = %+v after %d messages", j, len(e.smsc.sent()))
-	}
+		var file []byte
 
-	// Every PoR fits the TP-UD of an SMS-DELIVER-REPORT (TS 23.040 clause 9.2.2.1a).
-	r := ota.Response{Counter: 9, Data: append([]byte{2, 0x90, 0}, bytes.Repeat([]byte{1}, jobs.ReadChunk)...)}
-	copy(r.TAR[:], tar)
-
-	for _, k := range []ota.Keyset{e.keyset, aesKeyset(t)} {
-		udh, ud, err := ota.EncodeResponse(k, jobs.SPI, r)
-		if err != nil || len(udh)+len(ud) > 159 {
-			t.Fatalf("PoR of %d octets, %v", len(udh)+len(ud), err)
+		for i, n := range []int{125, 125, 5} {
+			chunk := bytes.Repeat([]byte{byte(i + 1)}, n)
+			file = append(file, chunk...)
+			e.answer(t, id, ota.StatusPoROK, "02"+"9000"+hex.EncodeToString(chunk))
+			e.step()
 		}
-	}
+
+		j := e.job(t, id)
+		if j.Status != db.JobSucceeded || !bytes.Equal(j.Data, file) || len(e.smsc.sent()) != 4 || j.Counter != 4 {
+			t.Fatalf("job = %+v after %d messages", j, len(e.smsc.sent()))
+		}
+
+		// Every PoR fits the TP-UD of an SMS-DELIVER-REPORT (TS 23.040 clause 9.2.2.1a).
+		r := ota.Response{Counter: 9, Data: append([]byte{2, 0x90, 0}, bytes.Repeat([]byte{1}, jobs.ReadChunk)...)}
+		copy(r.TAR[:], tar)
+
+		for _, k := range []ota.Keyset{e.keyset, aesKeyset(t)} {
+			udh, ud, err := ota.EncodeResponse(k, jobs.SPI, r)
+			if err != nil || len(udh)+len(ud) > 159 {
+				t.Fatalf("PoR of %d octets, %v", len(udh)+len(ud), err)
+			}
+		}
+	})
 }
 
 func TestReadFailures(t *testing.T) {
@@ -372,16 +476,19 @@ func TestReadFailures(t *testing.T) {
 		{"file not found", "01" + "6a82", "command 1 of 2 failed with status word 6a82"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, "+15550000001", sja5(t))
-			id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+			forms(t, func(t *testing.T, generic bool) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
-			e.step()
-			e.answer(t, id, ota.StatusPoROK, tc.answer)
-			e.step()
+				e.step()
+				e.answer(t, id, ota.StatusPoROK, tc.answer)
+				e.step()
 
-			if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, tc.err) {
-				t.Fatalf("job = %+v", j)
-			}
+				if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, tc.err) {
+					t.Fatalf("job = %+v", j)
+				}
+			})
 		})
 	}
 }
@@ -405,21 +512,24 @@ func TestSetAndClear(t *testing.T) {
 		{"read-back failed", clear2, "03" + "6f00", db.JobUnconfirmed, "written, but"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, "+15550000001", sja5(t))
-			id := e.queue(t, tc.job)
+			forms(t, func(t *testing.T, generic bool) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, tc.job)
 
-			e.step()
-			e.answer(t, id, ota.StatusPoROK, tc.answer)
-			e.step()
+				e.step()
+				e.answer(t, id, ota.StatusPoROK, tc.answer)
+				e.step()
 
-			j := e.job(t, id)
-			if j.Status != tc.status || !strings.Contains(j.Error, tc.err) || len(e.smsc.sent()) != 1 {
-				t.Fatalf("job = %+v", j)
-			}
+				j := e.job(t, id)
+				if j.Status != tc.status || !strings.Contains(j.Error, tc.err) || len(e.smsc.sent()) != 1 {
+					t.Fatalf("job = %+v", j)
+				}
 
-			if strings.Contains(tc.name, "warning") && !j.Warning {
-				t.Fatalf("job = %+v, want a warning", j)
-			}
+				if strings.Contains(tc.name, "warning") && !j.Warning {
+					t.Fatalf("job = %+v, want a warning", j)
+				}
+			})
 		})
 	}
 }
@@ -442,30 +552,82 @@ func TestPoRStatus(t *testing.T) {
 		{"TAR unknown", set, ota.StatusTARUnknown, db.JobFailed, "no application at TAR b00001"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, "+15550000001", sja5(t))
-			id := e.queue(t, tc.job)
+			forms(t, func(t *testing.T, generic bool) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, tc.job)
 
-			e.step()
-			e.answer(t, id, tc.status, "")
-			e.step()
+				e.step()
+				e.answer(t, id, tc.status, "")
+				e.step()
 
-			if j := e.job(t, id); j.Status != tc.want || !strings.Contains(j.Error, tc.err) || j.PoRStatus != int(tc.status) {
-				t.Fatalf("job = %+v", j)
-			}
+				if j := e.job(t, id); j.Status != tc.want || !strings.Contains(j.Error, tc.err) || j.PoRStatus != int(tc.status) {
+					t.Fatalf("job = %+v", j)
+				}
+			})
 		})
 	}
 }
 
-// TestPoRForAnotherCommand checks that a PoR is the answer to the job's command: its TAR, and its counter when
-// secured, are the command's (TS 102 225 table 3).
-func TestPoRForAnotherCommand(t *testing.T) {
+// TestPoRNotThisCommand checks that a PoR is attached to a job only when it answers its command: from the card's
+// number, with the command's TAR and counter (TS 102 225 clause 5.2, table 3). Another one is acknowledged and left
+// aside, and the job keeps waiting for its own (review L1).
+func TestPoRNotThisCommand(t *testing.T) {
+	forms(t, func(t *testing.T, generic bool) {
+		for _, tc := range []struct {
+			name    string
+			source  string
+			tar     []byte
+			counter uint64
+		}{
+			{"other TAR", "15550000001", []byte{0xb0, 0x00, 0x20}, 1},
+			{"other counter", "15550000001", tar, 7},
+			{"an earlier command's counter", "15550000001", tar, 0},
+			{"other card", "15550000002", tar, 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+				e.step()
+
+				j := e.job(t, id)
+				d := e.simAnswer(j, e.porOf(t, tc.tar, tc.counter, ota.StatusPoROK, "039000ffffff0000"))
+				d.Source.Addr = tc.source
+				e.smsc.deliver(t, d)
+
+				if j := e.job(t, id); j.Status != db.JobSent || j.Response != nil {
+					t.Fatalf("job = %+v", j)
+				}
+
+				// Its own PoR is still taken.
+				e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
+
+				if j := e.job(t, id); j.Status != db.JobSucceeded {
+					t.Fatalf("job = %+v", j)
+				}
+			})
+		}
+	})
+}
+
+// TestPoRForms checks that the card's answer is told by its content, a Response Packet behind the user data header
+// 02 71 00, from the card's number: as a normal message or an SME Manual/User Acknowledgement, with or without UDHI
+// (TS 31.115 clause 4.1), with or without receipted_message_id, in short_message or message_payload (SMPP 3.4
+// section 4.6.1).
+func TestPoRForms(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		tar     []byte
-		counter uint64
+		name     string
+		esmClass byte
+		tlv      bool
+		payload  bool
 	}{
-		{"other TAR", []byte{0xb0, 0x00, 0x20}, 1},
-		{"other counter", tar, 7},
+		{"normal message", 0x00, false, false},
+		{"normal message with UDHI", 0x40, false, false},
+		{"user acknowledgement without UDHI", 0x10, true, false},
+		{"user acknowledgement", 0x50, true, false},
+		{"message_payload", 0x40, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, "+15550000001", sja5(t))
@@ -473,22 +635,45 @@ func TestPoRForAnotherCommand(t *testing.T) {
 
 			e.step()
 
-			r := ota.Response{Counter: tc.counter, Data: mustHex(t, "039000ffffff0000")}
-			copy(r.TAR[:], tc.tar)
+			d := e.simAnswer(e.job(t, id), e.por(t, id, ota.StatusPoROK, "039000ffffff0000"))
+			d.ESMClass, d.Options = tc.esmClass, smpp.Options{}
 
-			udh, ud, err := ota.EncodeResponse(e.keyset, jobs.SPI, r)
-			if err != nil {
-				t.Fatal(err)
+			if tc.tlv {
+				d.Options.ReceiptedMessageID = new(e.job(t, id).MessageID)
 			}
 
-			j := e.job(t, id)
-			e.smsc.deliver(t, e.simAnswer(j, append(udh, ud...)))
+			if tc.payload {
+				d.Options.MessagePayload, d.ShortMessage = d.ShortMessage, nil
+			}
 
-			if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "not this command's") {
+			e.smsc.deliver(t, d)
+
+			if j := e.job(t, id); j.Status != db.JobSucceeded {
 				t.Fatalf("job = %+v", j)
 			}
 		})
 	}
+
+	t.Run("not a PoR", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+		e.step()
+
+		// A text from the card, an SMSC delivery acknowledgement carrying a PoR, and a PoR behind another header.
+		por := e.por(t, id, ota.StatusPoROK, "039000ffffff0000")
+		for _, d := range []*smpp.DeliverSM{
+			{Message: smpp.Message{Source: smpp.Address{Addr: "15550000001"}, ShortMessage: []byte("hi")}},
+			{Message: smpp.Message{Source: smpp.Address{Addr: "15550000001"}, ESMClass: 0x08, ShortMessage: por}},
+			{Message: smpp.Message{Source: smpp.Address{Addr: "15550000001"}, ESMClass: 0x40, ShortMessage: append([]byte{5, 0, 3, 1, 1, 1}, por[3:]...)}},
+		} {
+			e.smsc.deliver(t, d)
+		}
+
+		if j := e.job(t, id); j.Status != db.JobSent {
+			t.Fatalf("job = %+v", j)
+		}
+	})
 }
 
 func TestNoPoR(t *testing.T) {
@@ -509,61 +694,65 @@ func TestNoPoR(t *testing.T) {
 		{"write undeliverable", clear2, nil, smpp.StateUndeliverable, db.JobUnconfirmed, "message undeliverable"},
 		{"read delivered", read, nil, smpp.StateDelivered, db.JobFailed, "without a PoR"},
 		{"read rejected", read, nil, smpp.StateRejected, db.JobFailed, "rejected"},
+		// L2: ACCEPTD is final (SMPP 3.4 appendix B, table B-2).
+		{"read accepted", read, nil, smpp.StateAccepted, db.JobFailed, "accepted"},
 		{"unsecured refusal", clear2, unsecured, smpp.StateDelivered, db.JobFailed, "unsecured"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, "+15550000001", sja5(t))
-			id := e.queue(t, tc.job)
+			forms(t, func(t *testing.T, generic bool) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, tc.job)
 
-			e.step()
+				e.step()
 
-			j := e.job(t, id)
-			if tc.answer != nil {
-				e.smsc.deliver(t, e.simAnswer(j, tc.answer))
-			}
+				j := e.job(t, id)
+				if tc.answer != nil {
+					e.smsc.deliver(t, e.simAnswer(j, tc.answer))
+				}
 
-			e.smsc.deliver(t, e.receipt(j, tc.state))
+				e.smsc.deliver(t, e.receipt(j, tc.state))
 
-			if j := e.job(t, id); j.Status != tc.want || !strings.Contains(j.Error, tc.err) {
-				t.Fatalf("job = %+v", j)
-			}
+				if j := e.job(t, id); j.Status != tc.want || !strings.Contains(j.Error, tc.err) {
+					t.Fatalf("job = %+v", j)
+				}
+			})
 		})
 	}
 }
 
-// TestReceiptNotFinal checks that ENROUTE leaves the job waiting (SMPP 3.4 section 5.2.28).
-func TestReceiptNotFinal(t *testing.T) {
+// TestUnsecuredPoRAmbiguous checks that an unsecured PoR, of counter zero, is left aside when two cards of the
+// number have a job of the TAR in flight: it cannot tell which it answers.
+func TestUnsecuredPoRAmbiguous(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
-	id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+	other := db.Card{
+		ICCID: "8949440000001659216", IMSI: "001010000000002", MSISDN: e.msisdn, TAR: tar, KVN: 1, KeySets: []db.KeySet{sja5(t)},
+	}
+
+	if err := e.store.CreateCard(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+	ids, err := e.store.CreateJobs(context.Background(), []db.Job{{ICCID: other.ICCID, Operation: db.OperationOPLMNRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	e.step()
-	e.smsc.deliver(t, e.receipt(e.job(t, id), smpp.StateEnroute))
+	e.smsc.deliver(t, e.simAnswer(e.job(t, id), []byte{2, 0x71, 0, 0, 0x0b, 0x0a, 0xb0, 0, 1, 0, 0, 0, 0, 0, 0, 6}))
 
-	if j := e.job(t, id); j.Status != db.JobSent {
-		t.Fatalf("job = %+v", j)
+	for _, id := range []int64{id, ids[0]} {
+		if j := e.job(t, id); j.Status != db.JobSent {
+			t.Fatalf("job = %+v", j)
+		}
 	}
 }
 
-// TestCorrelation checks how a deliver_sm finds its job: by receipted_message_id; for a receipt without it, by the id
-// of its text (SMPP 3.4 appendix B); for a SIM answer without it, by the card's number, the answer's source; and
-// that one for another message is acknowledged and left aside.
-func TestCorrelation(t *testing.T) {
-	t.Run("answer without receipted_message_id or UDHI", func(t *testing.T) {
-		e := newEnv(t, "+15550000001", sja5(t))
-		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
-
-		e.step()
-
-		d := e.simAnswer(e.job(t, id), e.por(t, id, ota.StatusPoROK, "039000ffffff0000"))
-		d.Options.ReceiptedMessageID = nil
-		d.ESMClass = 0x10 // SME Manual/User Acknowledgement, no UDHI: the PoR is read as if it were set (TS 31.115 4.1).
-		e.smsc.deliver(t, d)
-
-		if j := e.job(t, id); j.Status != db.JobSucceeded {
-			t.Fatalf("job = %+v", j)
-		}
-	})
-
+// TestReceiptCorrelation checks how a receipt finds its job: by receipted_message_id; without it, by the id of its
+// text (SMPP 3.4 appendix B), whose stat then gives the state; and that one for another message is left aside.
+func TestReceiptCorrelation(t *testing.T) {
 	t.Run("receipt without TLVs", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -579,7 +768,24 @@ func TestCorrelation(t *testing.T) {
 		}
 	})
 
-	t.Run("deliver_sm for another message", func(t *testing.T) {
+	t.Run("receipted_message_id first", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+		e.step()
+
+		other := e.job(t, id)
+		other.MessageID = "999"
+		d := e.receipt(other, smpp.StateDelivered)
+		d.Options.ReceiptedMessageID = new(e.job(t, id).MessageID)
+		e.smsc.deliver(t, d)
+
+		if j := e.job(t, id); j.Status != db.JobFailed {
+			t.Fatalf("job = %+v", j)
+		}
+	})
+
+	t.Run("receipt for another message", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
@@ -588,10 +794,6 @@ func TestCorrelation(t *testing.T) {
 		j := e.job(t, id)
 		j.MessageID = "999"
 		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
-		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, fcp(60))))
-
-		// Neither a normal message.
-		e.smsc.deliver(t, &smpp.DeliverSM{Message: smpp.Message{Source: smpp.Address{Addr: "15550000001"}, ShortMessage: []byte("hi")}})
 
 		if j := e.job(t, id); j.Status != db.JobSent {
 			t.Fatalf("job = %+v", j)
@@ -599,14 +801,78 @@ func TestCorrelation(t *testing.T) {
 	})
 }
 
-// TestNoReceipt checks that a job sent long past its validity, without a receipt, ends.
-func TestNoReceipt(t *testing.T) {
+// TestReceiptBeforePoR checks an SMSC that sends the receipt before the card's answer: the receipt closes the job
+// without a PoR, and the PoR, matched by TAR and counter, then gives its outcome, or resumes a read.
+func TestReceiptBeforePoR(t *testing.T) {
+	t.Run("write", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+		e.step()
+
+		j := e.job(t, id)
+		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+
+		if j := e.job(t, id); j.Status != db.JobUnconfirmed || !j.PoRMissing {
+			t.Fatalf("after the receipt, job = %+v", j)
+		}
+
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, "039000ffffff0000")))
+
+		if j := e.job(t, id); j.Status != db.JobSucceeded || j.Error != "" || j.PoRMissing {
+			t.Fatalf("after the PoR, job = %+v", j)
+		}
+	})
+
+	t.Run("read", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		e.generic = true
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+		e.step()
+
+		j := e.job(t, id)
+		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+		e.answer(t, id, ota.StatusPoROK, fcp(5))
+
+		if j := e.job(t, id); j.Status != db.JobQueued || j.Step != 1 || j.FileSize != 5 {
+			t.Fatalf("after the PoR, job = %+v", j)
+		}
+
+		e.step()
+		e.answer(t, id, ota.StatusPoROK, "02"+"9000"+"00f110ffff")
+
+		if j := e.job(t, id); j.Status != db.JobSucceeded {
+			t.Fatalf("job = %+v", j)
+		}
+	})
+
+	t.Run("read of a card with another job", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+		e.step()
+
+		j := e.job(t, id)
+		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+		e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, fcp(5))))
+
+		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "another job") || j.FileSize != 5 {
+			t.Fatalf("job = %+v", j)
+		}
+	})
+}
+
+// TestNoAnswer checks that a job sent long past its validity, without a PoR or a receipt, ends; and that its late PoR
+// still gives its outcome (review M1).
+func TestNoAnswer(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
 
 	e.step()
 
-	e.now = e.now.Add(24 * time.Hour)
+	e.now = e.now.Add(24*time.Hour + 5*time.Hour)
 	e.step()
 
 	if j := e.job(t, id); j.Status != db.JobSent {
@@ -616,24 +882,190 @@ func TestNoReceipt(t *testing.T) {
 	e.now = e.now.Add(2 * time.Hour)
 	e.step()
 
-	if j := e.job(t, id); j.Status != db.JobUnconfirmed || !strings.Contains(j.Error, "no delivery receipt") {
+	j := e.job(t, id)
+	if j.Status != db.JobUnconfirmed || !strings.Contains(j.Error, "no PoR and no delivery receipt") || !j.PoRMissing {
+		t.Fatalf("job = %+v", j)
+	}
+
+	e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, "039000ffffff0000")))
+
+	if j := e.job(t, id); j.Status != db.JobSucceeded || j.Error != "" {
+		t.Fatalf("after the late PoR, job = %+v", j)
+	}
+}
+
+// TestNoTimeoutWhileUnbound checks that sent jobs do not time out while unbound, nor until the SMSC has had time to
+// send what it held once bound again (review M1).
+func TestNoTimeoutWhileUnbound(t *testing.T) {
+	e := newEnv(t, "+15550000001", sja5(t))
+	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+	e.step()
+
+	if err := e.gw.Apply(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	e.now = e.now.Add(3 * 24 * time.Hour)
+	e.step()
+
+	if j := e.job(t, id); j.Status != db.JobSent {
+		t.Fatalf("while unbound, job = %+v", j)
+	}
+
+	e.rebind(t)
+
+	e.now = e.now.Add(time.Minute)
+	e.step()
+	e.now = e.now.Add(time.Hour)
+	e.step()
+
+	if j := e.job(t, id); j.Status != db.JobSent {
+		t.Fatalf("just after the bind, job = %+v", j)
+	}
+
+	e.now = e.now.Add(6 * time.Hour)
+	e.step()
+
+	if j := e.job(t, id); j.Status != db.JobUnconfirmed {
+		t.Fatalf("job = %+v", j)
+	}
+}
+
+// TestDeadlineOfTheMessage checks that the deadline is the validity a command was sent with, not the one set since
+// (review L9).
+func TestDeadlineOfTheMessage(t *testing.T) {
+	e := newEnv(t, "+15550000001", sja5(t))
+	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+	e.step()
+
+	e.validity = time.Hour
+	e.now = e.now.Add(10 * time.Hour)
+	e.step()
+
+	if j := e.job(t, id); j.Status != db.JobSent || !j.ExpiresAt.After(j.UpdatedAt.Add(23*time.Hour)) {
+		t.Fatalf("job = %+v", j)
+	}
+}
+
+// TestStoreFailures checks that a deliver_sm whose outcome cannot be stored is answered ESME_RX_T_APPN, so that the
+// SMSC sends it again, and that the copy then sent is recorded (review H1, M2).
+func TestStoreFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault func(s *faultyStore, err error)
+	}{
+		{"finish", func(s *faultyStore, err error) { s.finish = err }},
+		{"card", func(s *faultyStore, err error) { s.card = err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forms(t, func(t *testing.T, generic bool) {
+				e := newEnv(t, "+15550000001", sja5(t))
+				e.generic = generic
+				id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+				e.step()
+
+				d := e.simAnswer(e.job(t, id), e.por(t, id, ota.StatusPoROK, "039000ffffff0000"))
+
+				e.faults.set(func(s *faultyStore) { tc.fault(s, errDB) })
+
+				var se *smpp.StatusError
+				if err := e.smsc.try(d); !errors.As(err, &se) || se.Status != smpp.StatusXTAppn {
+					t.Fatalf("deliver_sm_resp = %v, want ESME_RX_T_APPN", err)
+				}
+
+				if j := e.job(t, id); j.Status != db.JobSent {
+					t.Fatalf("after the failure, job = %+v", j)
+				}
+
+				e.faults.set(func(s *faultyStore) { tc.fault(s, nil) })
+				e.smsc.deliver(t, d)
+
+				if j := e.job(t, id); j.Status != db.JobSucceeded {
+					t.Fatalf("after the retry, job = %+v", j)
+				}
+
+				// A copy for the closed job is acknowledged.
+				e.smsc.deliver(t, d)
+			})
+		})
+	}
+
+	t.Run("receipt", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+		e.step()
+
+		d := e.receipt(e.job(t, id), smpp.StateExpired)
+
+		e.faults.set(func(s *faultyStore) { s.finish = errDB })
+
+		if err := e.smsc.try(d); err == nil {
+			t.Fatal("deliver_sm_resp ESME_ROK, want ESME_RX_T_APPN")
+		}
+
+		e.faults.set(func(s *faultyStore) { s.finish = nil })
+		e.smsc.deliver(t, d)
+
+		if j := e.job(t, id); j.Status != db.JobUnconfirmed {
+			t.Fatalf("job = %+v", j)
+		}
+	})
+}
+
+// TestMarkSentFails checks that a message that cannot be recorded is sent again with a higher counter, and that the
+// first one's PoR, of the spent counter, is not taken for the job's (review L6).
+func TestMarkSentFails(t *testing.T) {
+	e := newEnv(t, "+15550000001", sja5(t))
+	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+
+	e.faults.set(func(s *faultyStore) { s.markSent = errDB })
+	e.step()
+	e.faults.set(func(s *faultyStore) { s.markSent = nil })
+
+	if j := e.job(t, id); j.Status != db.JobQueued || len(e.smsc.sent()) != 1 {
+		t.Fatalf("job = %+v", j)
+	}
+
+	e.step()
+
+	j := e.job(t, id)
+	if j.Status != db.JobSent || j.Counter != 2 || len(e.smsc.sent()) != 2 {
+		t.Fatalf("job = %+v", j)
+	}
+
+	e.smsc.deliver(t, e.simAnswer(j, e.porOf(t, tar, 1, ota.StatusPoROK, "039000ffffff0000")))
+
+	if j := e.job(t, id); j.Status != db.JobSent {
+		t.Fatalf("after the first message's PoR, job = %+v", j)
+	}
+
+	e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
+
+	if j := e.job(t, id); j.Status != db.JobSucceeded {
 		t.Fatalf("job = %+v", j)
 	}
 }
 
 // TestAES runs a job on an AES key set with 4-octet checksums, which needs the counter (TS 102 225 clause 5.1.2).
 func TestAES(t *testing.T) {
-	k := aesKeyset(t)
-	e := newEnv(t, "+15550000001", db.KeySet{Version: 2, Algorithm: "aes", KIc: k.KIc, KID: k.KID, CCLength: 4})
-	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
+	forms(t, func(t *testing.T, generic bool) {
+		k := aesKeyset(t)
+		e := newEnv(t, "+15550000001", db.KeySet{Version: 2, Algorithm: "aes", KIc: k.KIc, KID: k.KID, CCLength: 4})
+		e.generic = generic
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
 
-	e.step()
-	e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
-	e.step()
+		e.step()
+		e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
+		e.step()
 
-	if j := e.job(t, id); j.Status != db.JobSucceeded {
-		t.Fatalf("job = %+v", j)
-	}
+		if j := e.job(t, id); j.Status != db.JobSucceeded {
+			t.Fatalf("job = %+v", j)
+		}
+	})
 }
 
 func TestSendFailures(t *testing.T) {
@@ -668,12 +1100,80 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("job = %+v, want it queued for a retry", j)
 		}
 
-		// The retry takes a new counter: the spent one may have reached the card.
+		// The runner backs off: nothing is sent before the backoff ends (review L5).
 		e.smsc.setStatus(smpp.StatusOK)
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobQueued || len(e.smsc.sent()) != 0 {
+			t.Fatalf("during the backoff, job = %+v", j)
+		}
+
+		// The retry takes a new counter: the spent one may have reached the card.
+		e.now = e.now.Add(time.Minute)
 		e.step()
 
 		if j := e.job(t, id); j.Status != db.JobSent || j.Counter != 2 {
 			t.Fatalf("after the SMSC came back, job = %+v", j)
+		}
+	})
+
+	// A throttling stops the batch, and a command that the SMSC never takes fails after the last attempt (review L5).
+	t.Run("SMSC keeps throttling", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		other := db.Card{ICCID: "8949440000001659216", IMSI: "001010000000002", MSISDN: "+15550000002", TAR: tar, KVN: 1, KeySets: []db.KeySet{sja5(t)}}
+
+		if err := e.store.CreateCard(context.Background(), other); err != nil {
+			t.Fatal(err)
+		}
+
+		e.smsc.setStatus(smpp.StatusMsgQFul)
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+		ids, err := e.store.CreateJobs(context.Background(), []db.Job{{ICCID: other.ICCID, Operation: db.OperationOPLMNRead}})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for range 9 {
+			e.step()
+			e.now = e.now.Add(10 * time.Minute)
+		}
+
+		if j := e.job(t, id); j.Status != db.JobQueued {
+			t.Fatalf("after 9 attempts, job = %+v", j)
+		}
+
+		if n, _ := e.store.NextCounter(context.Background(), other.ICCID, 1); n != 1 {
+			t.Fatalf("the batch went on to the next job, counter %d", n)
+		}
+
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "10 attempts") {
+			t.Fatalf("job = %+v", j)
+		}
+
+		if j := e.job(t, ids[0]); j.Status != db.JobQueued {
+			t.Fatalf("other job = %+v", j)
+		}
+	})
+
+	// The SMSC answers ESME_RINVBNDSTS while it unbinds: the job waits for the next bind (review L4).
+	t.Run("SMSC unbinding", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		e.smsc.setStatus(smpp.StatusInvBndSts)
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobQueued {
+			t.Fatalf("job = %+v", j)
+		}
+
+		e.smsc.setStatus(smpp.StatusOK)
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobSent {
+			t.Fatalf("job = %+v", j)
 		}
 	})
 
@@ -707,6 +1207,7 @@ func TestRejected(t *testing.T) {
 		{&smpp.StatusError{Command: smpp.CmdSubmitSMResp, Status: smpp.StatusThrottled}, false},
 		{&smpp.StatusError{Command: smpp.CmdSubmitSMResp, Status: smpp.StatusMsgQFul}, false},
 		{&smpp.StatusError{Command: smpp.CmdSubmitSMResp, Status: smpp.StatusSysErr}, false},
+		{&smpp.StatusError{Command: smpp.CmdSubmitSMResp, Status: smpp.StatusInvBndSts}, false},
 		{smpp.ErrResponseTimeout, false},
 		{smpp.ErrClosed, false},
 	} {
@@ -726,20 +1227,27 @@ func TestValidityPeriod(t *testing.T) {
 		{24 * time.Hour, "000001000000000R"},
 		{90 * time.Minute, "000000013000000R"},
 		{time.Second, "000000000001000R"},
-		{103 * 24 * time.Hour, "000099960000000R"},
-		// Beyond 99 days and 99 hours, an absolute time in UTC (SMPP 3.4 section 7.1.1.1).
-		{63 * 7 * 24 * time.Hour, "280112120000000+"},
+		{25*time.Hour + 61*time.Second, "000001010101000R"},
+		// L3: the fields stay normalised up to 99 days.
+		{jobs.MaxValidity - time.Second, "000098235959000R"},
+		{jobs.MaxValidity, "000099000000000R"},
 	} {
-		got, err := jobs.ValidityPeriod(tc.validity, now)
+		got, err := jobs.ValidityPeriod(tc.validity)
 		if err != nil || got != tc.want {
 			t.Errorf("ValidityPeriod(%v) = %q, %v, want %q", tc.validity, got, err, tc.want)
 			continue
 		}
 
-		// Ella SMSC reads it back to the same expiry.
+		// The SMSC reads it back to the same expiry.
 		vp, err := smpp.ParseTime(got, now)
 		if err != nil || !vp.At(now).Equal(now.Add(tc.validity)) {
 			t.Errorf("%q reads as %v, %v", got, vp.At(now), err)
+		}
+	}
+
+	for _, v := range []time.Duration{0, jobs.MaxValidity + time.Second, 100 * 24 * time.Hour} {
+		if got, err := jobs.ValidityPeriod(v); err == nil {
+			t.Errorf("ValidityPeriod(%v) = %q, want an error", v, got)
 		}
 	}
 }

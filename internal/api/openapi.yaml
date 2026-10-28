@@ -320,7 +320,7 @@ paths:
       operationId: getSMSC
       summary: Get the SMSC
       description: >-
-        The Ella SMSC that OTA messages go through over SMPP 3.4, without its password, and the state of simota's
+        The SMSC, such as Ella SMSC, that OTA messages go through over SMPP 3.4, without its password, and the state of simota's
         transceiver bind to it. Unset, the host is empty.
       responses:
         "200":
@@ -619,11 +619,12 @@ components:
           description: >-
             A job runs as one or more commands, each a short message: a set or a clear writes its slot and reads it
             back; a read gets the file's size, then reads it in chunks that fit a PoR. queued until simota submits the
-            next command to Ella SMSC, sent until the SMSC forwards the card's answer or its delivery receipt. succeeded when every PoR and status
+            next command to the SMSC, sent until the SMSC forwards the card's answer or its delivery receipt. succeeded when every PoR and status
             word is good and a set or a clear reads back what it wrote: the file is written on the card; the UE uses
             it after its next USIM initialisation or a REFRESH (ETSI TS 102 226 clause 4). unconfirmed when a set or a
             clear may have taken effect without a PoR that tells, such as one the card sends later by SMS-SUBMIT.
-            failed otherwise.
+            failed otherwise. A job closed by a delivery receipt or by the deadline, without a PoR, takes the outcome of
+            a PoR that comes later with its last command's TAR and counter.
         step:
           type: integer
           description: The index of the job's current command.
@@ -638,7 +639,7 @@ components:
           description: The last status word completed with a warning (ETSI TS 102 221 table 10.9).
         message_id:
           type: string
-          description: The message_id that Ella SMSC gave the current command's submit_sm (SMPP 3.4 section 4.4.2).
+          description: The message_id that the SMSC gave the current command's submit_sm (SMPP 3.4 section 4.4.2).
         por_status:
           type: string
           description: The Response Status Code of the card's PoR (ETSI TS 102 225 clause 5.2.2), such as por_ok.
@@ -672,7 +673,7 @@ components:
       properties:
         host:
           type: string
-          description: The host name or IP address of Ella SMSC's SMPP listener.
+          description: The host name or IP address of the SMSC's SMPP listener.
           examples: ["127.0.0.1"]
         port:
           type: integer
@@ -682,7 +683,7 @@ components:
           description: The connection is over TLS, checked against the system's roots.
         system_id:
           type: string
-          description: The system_id of simota's ESME account on Ella SMSC (SMPP 3.4 section 5.2.1).
+          description: The system_id of simota's ESME account on the SMSC (SMPP 3.4 section 5.2.1).
         originator:
           type: string
           description: The E.164 address the OTA messages come from.
@@ -696,11 +697,9 @@ components:
           $ref: "#/components/schemas/BindState"
     BindState:
       type: object
-      required: [bound, status, since]
+      required: [status, since]
       description: simota's SMPP session to the SMSC, one transceiver bind, bound again whenever it is lost.
       properties:
-        bound:
-          type: boolean
         status:
           type: string
           enum: [unset, connecting, bound, disconnected]
@@ -750,8 +749,10 @@ components:
         validity_seconds:
           type: integer
           minimum: 1
-          maximum: 38102400
-          description: At most 63 weeks, the longest validity period of an SMS-SUBMIT (3GPP TS 23.040 clause 9.2.3.12.1).
+          maximum: 8553600
+          description: >-
+            At most 99 days: simota sends the validity_period as a relative time, whose days field has two digits
+            (SMPP 3.4 section 7.1.1.2). The SMSC may impose a lower limit.
     Error:
       type: object
       required: [error]

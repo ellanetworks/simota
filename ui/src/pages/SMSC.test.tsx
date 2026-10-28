@@ -16,7 +16,7 @@ const unset: SMSCSettings = {
   originator: "",
   validity_seconds: 86400,
   password_set: false,
-  bind: { bound: false, status: "unset", since: SINCE },
+  bind: { status: "unset", since: SINCE },
 };
 
 const set: SMSCSettings = {
@@ -28,7 +28,6 @@ const set: SMSCSettings = {
   validity_seconds: 86400,
   password_set: true,
   bind: {
-    bound: true,
     status: "bound",
     since: SINCE,
     smsc_system_id: "EllaSMSC",
@@ -48,7 +47,7 @@ const serve = (
         originator: body.originator,
         validity_seconds: body.validity_seconds,
         password_set: true,
-        bind: { bound: false, status: "connecting", since: SINCE },
+        bind: { status: "connecting", since: SINCE },
       },
     }),
 ) => {
@@ -159,7 +158,6 @@ describe("SMSC", () => {
     serve({
       ...set,
       bind: {
-        bound: false,
         status: "disconnected",
         since: SINCE,
         last_error:
@@ -253,7 +251,7 @@ describe("SMSC", () => {
     ["no originator", /^Originator/, ""],
     ["a validity of 0", /^Validity/, "0"],
     ["a validity under a second", /^Validity/, "0.0001"],
-    ["a validity over 63 weeks", /^Validity/, "10585"],
+    ["a validity over 99 days", /^Validity/, "2377"],
     ["a validity that is not a number", /^Validity/, "1d"],
   ])("disables Update for %s", async (_name, label, value) => {
     serve(set);

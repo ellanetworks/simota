@@ -104,8 +104,8 @@ export const isMCC = (value: string): boolean => /^\d{3}$/.test(value);
 export const isMNC = (value: string): boolean => /^\d{2,3}$/.test(value);
 
 export const statusHelp: Record<JobStatus, string> = {
-  queued: "Queued: waiting to send its next command to Ella SMSC.",
-  sent: "Sent: Ella SMSC is delivering its command to the card.",
+  queued: "Queued: waiting to send its next command to the SMSC.",
+  sent: "Sent: the SMSC is delivering its command to the card.",
   succeeded:
     "Succeeded: written on the card; the phone uses it after its next USIM initialisation or REFRESH.",
   unconfirmed:

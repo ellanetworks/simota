@@ -1,5 +1,6 @@
-// MAX_VALIDITY_SECONDS is 63 weeks, the longest validity period of an SMS-SUBMIT (3GPP TS 23.040 clause 9.2.3.12.1).
-export const MAX_VALIDITY_SECONDS = 38102400;
+// MAX_VALIDITY_SECONDS is 99 days: simota sends the validity_period as a relative time, whose days field has two
+// digits (SMPP 3.4 section 7.1.1.2).
+export const MAX_VALIDITY_SECONDS = 8553600;
 
 // DEFAULT_PORT is the port IANA registers for SMPP.
 export const DEFAULT_PORT = 2775;
@@ -46,7 +47,7 @@ export const isSystemID = (value: string): boolean =>
 export const isPassword = (value: string): boolean =>
   value.length >= 1 && value.length <= MAX_PASSWORD && isPrintable(value);
 
-// validitySeconds are the seconds of a validity in hours, if it is one the SMSC takes: from 1 second to 63 weeks.
+// validitySeconds are the seconds of a validity in hours, if it is one the SMSC takes: from 1 second to 99 days.
 export const validitySeconds = (hours: string): number | undefined => {
   if (!/^\d+(\.\d+)?$/.test(hours.trim())) return undefined;
   const seconds = Math.round(Number(hours) * 3600);
