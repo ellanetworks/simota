@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ellanetworks/simota/internal/api"
 	"github.com/ellanetworks/simota/internal/db"
@@ -141,7 +140,7 @@ func TestJobEntries(t *testing.T) {
 		id := created.Result.Items[0].ID
 		j, _ := e.store.GetJob(context.Background(), id)
 
-		if err := e.store.MarkJobSent(context.Background(), id, 1, "9", []byte{1}, time.Now()); err != nil {
+		if err := e.store.MarkJobSent(context.Background(), id, 1, "9", []byte{1}); err != nil {
 			t.Fatal(err)
 		}
 

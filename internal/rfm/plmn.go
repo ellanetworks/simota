@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // FileOPLMNwAcT is the identifier of EF.OPLMNwAcT under ADF.USIM (TS 31.102 clause 4.2.53).
@@ -208,15 +207,6 @@ func DecodeSelector(b []byte) ([]SelectorEntry, error) {
 // SlotOffset is the offset of slot n, from 1, of a PLMN selector.
 func SlotOffset(n int) uint16 {
 	return uint16((n - 1) * selectorEntryLength)
-}
-
-func (a AccessTechnology) String() string {
-	names := a.Names()
-	if len(names) == 0 {
-		return "none"
-	}
-
-	return strings.Join(names, ", ")
 }
 
 func digits(s string, lo int) bool {

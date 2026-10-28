@@ -53,7 +53,13 @@ const columns = (
   onDelete: (card: Card) => void,
 ): GridColDef<Card>[] => [
   { field: "iccid", headerName: "ICCID", flex: 1, minWidth: 180 },
-  { field: "imsi", headerName: "IMSI", flex: 0.8, minWidth: 150 },
+  {
+    field: "imsi",
+    headerName: "IMSI",
+    flex: 0.8,
+    minWidth: 150,
+    valueGetter: (_value, row) => dash(row.imsi ?? ""),
+  },
   {
     field: "msisdn",
     headerName: "MSISDN",

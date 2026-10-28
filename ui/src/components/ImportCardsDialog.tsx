@@ -54,8 +54,8 @@ export default function ImportCardsDialog({
     >
       <Typography variant="body2" color="text.secondary">
         Card key file from the vendor, such as sysmocom&apos;s, with a header
-        row. Imports ICCID, IMSI and the KIC/KID key sets; ignores Ki, OPc,
-        PINs, ADM keys and KIKs.
+        row. Imports ICCID, the KIC/KID key sets and IMSI, if present; ignores
+        Ki, OPc, PINs, ADM keys and KIKs.
       </Typography>
       <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
         <Button component="label" variant="outlined" sx={{ flexShrink: 0 }}>

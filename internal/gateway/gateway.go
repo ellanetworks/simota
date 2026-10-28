@@ -1,5 +1,5 @@
-// Package gateway keeps simota's SMPP 3.4 session to the SMSC, such as Ella SMSC: one transceiver bind per process (SMPP 3.4 section
-// 2.2), bound again with a backoff whenever it is lost, with the SMSC settings as set.
+// Package gateway keeps simota's SMPP 3.4 session to the SMSC, such as Ella SMSC: one transceiver bind per process
+// (SMPP 3.4 section 2.2), bound again with smpp's backoff whenever it is lost, with the SMSC settings as set.
 package gateway
 
 import (
@@ -55,16 +55,11 @@ type State struct {
 	LastErrorAt time.Time
 }
 
-// Bound reports whether the session is bound.
-func (s State) Bound() bool { return s.Status == StatusBound }
-
 // Config configures a Gateway.
 type Config struct {
 	// Handler handles the SMSC's deliver_sm: delivery receipts and SIM answers.
 	Handler smpp.Handler
-	// MinBackoff and MaxBackoff bound the wait before binding again; zero values take smpp's defaults.
-	MinBackoff, MaxBackoff time.Duration
-	Logger                 *slog.Logger
+	Logger  *slog.Logger
 }
 
 // Gateway is the session to the SMSC. It is safe for concurrent use.
@@ -136,10 +131,8 @@ func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
 			ID: smpp.CmdBindTransceiver, SystemID: s.SystemID, Password: s.Password,
 			InterfaceVersion: smpp.InterfaceVersion,
 		},
-		Handler:    g.cfg.Handler,
-		MinBackoff: g.cfg.MinBackoff,
-		MaxBackoff: g.cfg.MaxBackoff,
-		Logger:     g.cfg.Logger,
+		Handler: g.cfg.Handler,
+		Logger:  g.cfg.Logger,
 	})
 }
 
@@ -163,19 +156,6 @@ func (g *Gateway) Bound() bool {
 	g.mu.Unlock()
 
 	return c != nil && c.State().Status == smpp.ConnBound
-}
-
-// WaitBound waits until the session is bound, or ctx ends.
-func (g *Gateway) WaitBound(ctx context.Context) error {
-	g.mu.Lock()
-	c := g.client
-	g.mu.Unlock()
-
-	if c == nil {
-		return smpp.ErrNoSession
-	}
-
-	return c.WaitBound(ctx)
 }
 
 // State is the session's state.

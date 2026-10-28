@@ -11,7 +11,8 @@ import (
 
 // Card is a SIM card, the MSISDN it is reached at, and the TAR and key set that OTA commands to it use.
 type Card struct {
-	ICCID       string
+	ICCID string
+	// IMSI is informational, empty when unknown: OTA reaches the card by its MSISDN.
 	IMSI        string
 	MSISDN      string
 	Description string
@@ -50,7 +51,7 @@ func (d *DB) CreateCard(ctx context.Context, c Card) error {
 		now := d.now().UnixMilli()
 
 		_, err := tx.ExecContext(ctx, `INSERT INTO cards (iccid, imsi, msisdn, description, tar, kvn, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, c.ICCID, c.IMSI, c.MSISDN, c.Description, c.TAR, c.KVN, now, now)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, c.ICCID, nullString(c.IMSI), c.MSISDN, c.Description, c.TAR, c.KVN, now, now)
 		if isUnique(err) {
 			return ErrAlreadyExists
 		}
@@ -88,7 +89,7 @@ func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (uint64
 // UpdateCard updates the settings of a card, not its key sets.
 func (d *DB) UpdateCard(ctx context.Context, c Card) error {
 	res, err := d.conn.ExecContext(ctx, `UPDATE cards SET imsi = ?, msisdn = ?, description = ?, tar = ?, kvn = ?,
-		updated_at = ? WHERE iccid = ?`, c.IMSI, c.MSISDN, c.Description, c.TAR, c.KVN, d.now().UnixMilli(), c.ICCID)
+		updated_at = ? WHERE iccid = ?`, nullString(c.IMSI), c.MSISDN, c.Description, c.TAR, c.KVN, d.now().UnixMilli(), c.ICCID)
 	if err != nil {
 		return fmt.Errorf("update card: %w", err)
 	}
@@ -130,15 +131,16 @@ func (d *DB) ListCards(ctx context.Context, page, perPage int) ([]Card, int, err
 	return cards, total, err
 }
 
-// ImportCards stores cards from a vendor's key file: a new card is created, and an existing card gets the IMSI and
-// key sets of the file, keeping its MSISDN, description, TAR, counters, and key set choice when the file still has
+// ImportCards stores cards from a vendor's key file: a new card is created, and an existing card gets the IMSI, if the
+// file has one, and key sets of the file, keeping its MSISDN, description, TAR, counters, and key set choice when the file still has
 // that key set; otherwise its first one.
 func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated int, err error) {
 	err = d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.now().UnixMilli()
 
 		for _, c := range cards {
-			res, err := tx.ExecContext(ctx, "UPDATE cards SET imsi = ?, updated_at = ? WHERE iccid = ?", c.IMSI, now, c.ICCID)
+			res, err := tx.ExecContext(ctx, "UPDATE cards SET imsi = coalesce(?, imsi), updated_at = ? WHERE iccid = ?",
+				nullString(c.IMSI), now, c.ICCID)
 			if err != nil {
 				return err
 			}
@@ -147,7 +149,7 @@ func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated in
 				updated++
 			} else {
 				if _, err := tx.ExecContext(ctx, `INSERT INTO cards (iccid, imsi, msisdn, description, tar, kvn, created_at,
-					updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, c.ICCID, c.IMSI, c.MSISDN, c.Description, c.TAR, c.KVN, now,
+					updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, c.ICCID, nullString(c.IMSI), c.MSISDN, c.Description, c.TAR, c.KVN, now,
 					now); err != nil {
 					return err
 				}
@@ -217,15 +219,16 @@ func (d *DB) cards(ctx context.Context, clause string, args ...any) ([]Card, err
 	for rows.Next() {
 		var (
 			c                    Card
+			imsi                 sql.NullString
 			created, lastUpdated int64
 		)
 
-		if err := rows.Scan(&c.ICCID, &c.IMSI, &c.MSISDN, &c.Description, &c.TAR, &c.KVN, &created, &lastUpdated); err != nil {
+		if err := rows.Scan(&c.ICCID, &imsi, &c.MSISDN, &c.Description, &c.TAR, &c.KVN, &created, &lastUpdated); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("list cards: %w", err)
 		}
 
-		c.CreatedAt, c.UpdatedAt = time.UnixMilli(created), time.UnixMilli(lastUpdated)
+		c.IMSI, c.CreatedAt, c.UpdatedAt = imsi.String, time.UnixMilli(created), time.UnixMilli(lastUpdated)
 		index[c.ICCID] = len(cards)
 		cards = append(cards, c)
 	}

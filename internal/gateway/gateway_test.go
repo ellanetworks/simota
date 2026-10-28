@@ -75,11 +75,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestGateway(t *testing.T) {
 	port, binds := smsc(t)
-	g := gateway.New(gateway.Config{MinBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond})
+	g := gateway.New(gateway.Config{})
 
 	t.Cleanup(func() { _ = g.Close(context.Background()) })
 
-	if st := g.State(); st.Status != gateway.StatusUnset || st.Bound() {
+	if st := g.State(); st.Status != gateway.StatusUnset {
 		t.Fatalf("unset state %+v", st)
 	}
 
@@ -122,7 +122,7 @@ func TestGateway(t *testing.T) {
 
 	waitFor(t, "a refused bind", func() bool { return g.State().LastError != "" })
 
-	if st := g.State(); st.Bound() || !strings.Contains(st.LastError, "ESME_RBINDFAIL") {
+	if st := g.State(); st.Status == gateway.StatusBound || !strings.Contains(st.LastError, "ESME_RBINDFAIL") {
 		t.Fatalf("refused state %+v", st)
 	}
 

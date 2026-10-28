@@ -116,10 +116,9 @@ function ProfileFields({
         value={profile.imsi}
         onChange={(e) => onChange({ imsi: e.target.value.trim() })}
         error={errors.imsi !== undefined}
-        helperText={errors.imsi}
+        helperText={errors.imsi ?? "Informational. Optional."}
         inputMode="numeric"
         placeholder="001010000000001"
-        required
       />
       <TextField
         label="MSISDN"
@@ -301,7 +300,7 @@ export function EditCardDialog({
   const queryClient = useQueryClient();
   const { showSnackbar } = useSnackbar();
   const [profile, setProfile] = useState<Profile>({
-    imsi: card.imsi,
+    imsi: card.imsi ?? "",
     msisdn: card.msisdn,
     description: card.description,
     tar: card.tar,

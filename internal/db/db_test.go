@@ -158,6 +158,31 @@ func TestImportCards(t *testing.T) {
 		t.Fatalf("imported over = %+v", got)
 	}
 
+	// A file without the IMSI keeps the card's; a card may have none.
+	noIMSI := card("8988211000000000017", 1, 2)
+	noIMSI.IMSI = ""
+
+	if _, _, err := d.ImportCards(ctx, []db.Card{noIMSI}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := d.GetCard(ctx, existing.ICCID); got.IMSI != "999700000000001" {
+		t.Fatalf("IMSI after an import without one = %q", got.IMSI)
+	}
+
+	if got, _ := d.GetCard(ctx, "8988211000000000025"); got.IMSI != "001010000000001" {
+		t.Fatalf("IMSI = %q", got.IMSI)
+	}
+
+	got.IMSI = ""
+	if err := d.UpdateCard(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := d.GetCard(ctx, existing.ICCID); got.IMSI != "" {
+		t.Fatalf("IMSI after clearing it = %q", got.IMSI)
+	}
+
 	cards, total, err := d.ListCards(ctx, 1, 25)
 	if err != nil {
 		t.Fatal(err)
@@ -301,14 +326,21 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("sent job before it is sent = %v", err)
 	}
 
-	expires := time.UnixMilli(time.Now().Add(time.Hour).UnixMilli())
-	if err := d.MarkJobSent(ctx, j.ID, 7, "55", []byte{1}, expires); err != nil {
+	// A failed submit is counted on the queued job.
+	if n, err := d.CountAttempt(ctx, j.ID); err != nil || n != 1 {
+		t.Fatalf("CountAttempt = %d, %v", n, err)
+	}
+
+	if err := d.MarkJobSent(ctx, j.ID, 7, "55", []byte{1}); err != nil {
 		t.Fatal(err)
 	}
 
+	if _, err := d.CountAttempt(ctx, j.ID); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("CountAttempt of a sent job = %v", err)
+	}
+
 	j, _ = d.GetJob(ctx, j.ID)
-	if j.Status != db.JobSent || j.Counter != 7 || j.MessageID != "55" || !bytes.Equal(j.TAR, []byte{0xb0, 0x00, 0x10}) ||
-		!j.ExpiresAt.Equal(expires) {
+	if j.Status != db.JobSent || j.Counter != 7 || j.MessageID != "55" || !bytes.Equal(j.TAR, []byte{0xb0, 0x00, 0x10}) {
 		t.Fatalf("sent = %+v", j)
 	}
 
@@ -330,14 +362,6 @@ func TestJobSteps(t *testing.T) {
 		}
 	}
 
-	// The sweep closes the job only while its command is still the one of its counter.
-	stale := j
-	stale.Counter, stale.Status, stale.Error = 6, db.JobFailed, "no PoR"
-
-	if err := d.ExpireJob(ctx, stale); !errors.Is(err, db.ErrNotFound) {
-		t.Fatalf("expire with another counter = %v", err)
-	}
-
 	j.Step, j.FileSize, j.PoRStatus, j.StatusWord, j.Response = 1, 60, 0, 0x9000, []byte{2}
 	if err := d.AdvanceJob(ctx, j); err != nil {
 		t.Fatal(err)
@@ -350,6 +374,11 @@ func TestJobSteps(t *testing.T) {
 	j, _ = d.GetJob(ctx, j.ID)
 	if j.Status != db.JobQueued || j.Step != 1 || j.FileSize != 60 || j.StatusWord != 0x9000 {
 		t.Fatalf("advanced = %+v", j)
+	}
+
+	// Sending the command started its count again.
+	if n, err := d.CountAttempt(ctx, j.ID); err != nil || n != 1 {
+		t.Fatalf("CountAttempt of the next command = %d, %v", n, err)
 	}
 
 	// A job closed without its PoR still awaits it, and a late PoR revises it.
@@ -367,42 +396,15 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("AwaitingPoR of a job closed without its PoR = %+v, %v", got, err)
 	}
 
-	// Resuming needs the card to have no other job in progress.
-	other, err := d.CreateJobs(ctx, []db.Job{{ICCID: c.ICCID, Operation: db.OperationOPLMNRead}})
-	if err != nil {
-		t.Fatal(err)
+	// Only the PoR of the last command's counter revises it.
+	stale := j
+	stale.Counter, stale.Status = 6, db.JobSucceeded
+
+	if err := d.ReviseJob(ctx, stale); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("revise with another counter = %v", err)
 	}
 
-	if err := d.ResumeJob(ctx, j); !errors.Is(err, db.ErrNotFound) {
-		t.Fatalf("resume while the card is busy = %v", err)
-	}
-
-	o, _ := d.GetJob(ctx, other[0])
-	o.Status = db.JobFailed
-
-	if err := d.FinishJob(ctx, o); err != nil {
-		t.Fatal(err)
-	}
-
-	j.Step = 2
-	if err := d.ResumeJob(ctx, j); err != nil {
-		t.Fatal(err)
-	}
-
-	if got, _ := d.GetJob(ctx, j.ID); got.Status != db.JobQueued || got.Step != 2 || got.PoRMissing || got.Error != "" {
-		t.Fatalf("resumed = %+v", got)
-	}
-
-	if err := d.MarkJobSent(ctx, j.ID, 8, "56", []byte{1}, expires); err != nil {
-		t.Fatal(err)
-	}
-
-	j.Status, j.Error, j.PoRMissing = db.JobFailed, "no PoR", true
-	if err := d.FinishJob(ctx, j); err != nil {
-		t.Fatal(err)
-	}
-
-	j.Counter, j.Status, j.Error, j.PoRMissing = 8, db.JobSucceeded, "", false
+	j.Status, j.Error, j.PoRMissing = db.JobSucceeded, "", false
 	if err := d.ReviseJob(ctx, j); err != nil {
 		t.Fatal(err)
 	}

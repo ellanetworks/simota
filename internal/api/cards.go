@@ -24,8 +24,9 @@ var (
 
 // Card is a card without its keys: the API never returns key material.
 type Card struct {
-	ICCID       string         `json:"iccid"`
-	IMSI        string         `json:"imsi"`
+	ICCID string `json:"iccid"`
+	// IMSI is informational, absent when unknown: OTA reaches the card by its MSISDN.
+	IMSI        string         `json:"imsi,omitempty"`
 	MSISDN      string         `json:"msisdn"`
 	Description string         `json:"description"`
 	TAR         string         `json:"tar"`
@@ -345,7 +346,7 @@ func validate(c db.Card) error {
 	switch {
 	case !iccidRE.MatchString(c.ICCID):
 		return errors.New("ICCID must be 18 to 20 digits")
-	case !imsiRE.MatchString(c.IMSI):
+	case c.IMSI != "" && !imsiRE.MatchString(c.IMSI):
 		return errors.New("IMSI must be 6 to 15 digits")
 	case c.MSISDN != "" && !msisdnRE.MatchString(c.MSISDN):
 		return errors.New("MSISDN must be E.164, such as +15550000001")

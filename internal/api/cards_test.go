@@ -118,6 +118,13 @@ func TestCardLifecycle(t *testing.T) {
 		t.Fatalf("update to a missing key set = %d", code)
 	}
 
+	// The IMSI is optional: without one, the card shows none.
+	code, body = e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000017", "application/json",
+		`{"msisdn":"+15550000002","description":"A56","tar":"b00001","kvn":1}`)
+	if code != http.StatusOK || strings.Contains(body, `"imsi"`) {
+		t.Fatalf("update without an IMSI = %d %s", code, body)
+	}
+
 	if code, body := e.do(t, http.MethodGet, "/api/v1/cards", "", ""); code != http.StatusOK || !strings.Contains(body, `"description":"A56"`) {
 		t.Fatalf("list = %d %s", code, body)
 	}
@@ -137,6 +144,7 @@ func TestCreateCardRejects(t *testing.T) {
 
 	for _, tc := range []struct{ from, to string }{
 		{`"iccid":"8988211000000000017"`, `"iccid":"12"`},
+		{`"imsi":"001010000000001"`, `"imsi":"00101"`},
 		{`"imsi":"001010000000001"`, `"imsi":"x"`},
 		{`"msisdn":"+15550000001"`, `"msisdn":"15550000001"`},
 		{`"tar":"b00001"`, `"tar":"b000"`},

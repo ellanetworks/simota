@@ -48,48 +48,127 @@ func pysimAES(t *testing.T) Keyset {
 	}
 }
 
-// secured is the SPI of a ciphered command with a CC that asks for a ciphered PoR with a CC.
-var secured = SPI{
-	Integrity:    IntegrityCC,
-	Ciphering:    true,
-	PoR:          PoRAlways,
-	PoRIntegrity: IntegrityCC,
-	PoRCiphering: true,
+// secured is SPI without the counter, that of the vectors of the SJA5 and of pySim: a ciphered command with a CC that
+// asks for a ciphered PoR with a CC. signed asks for a PoR with a CC, not ciphered, and plain for an unsecured PoR.
+const (
+	secured uint16 = 0x0619
+	signed  uint16 = 0x0609
+	plain   uint16 = 0x0601
+)
+
+// TestSPI checks that SPI is valid and what simota needs (TS 102 225 clause 5.1.1): a ciphered command with a
+// cryptographic checksum and a counter that must be higher, which AES requires (clause 5.1.2); a PoR always, of the
+// command's integrity, which a ciphered PoR needs ciphered with a cryptographic checksum, in the SMS-DELIVER-REPORT.
+func TestSPI(t *testing.T) {
+	first, second := byte(SPI>>8), byte(SPI&0xff)
+
+	for _, c := range []struct {
+		name string
+		got  byte
+		want byte
+	}{
+		{"integrity: cryptographic checksum", first & 0x03, 0x02},
+		{"ciphering", first & 0x04, 0x04},
+		{"counter higher than the card's", first >> 3 & 0x03, 0x02},
+		{"first octet reserved bits", first >> 5, 0},
+		{"PoR always", second & 0x03, 0x01},
+		{"PoR integrity of the command's", second >> 2 & 0x03, first & 0x03},
+		{"PoR ciphered", second & 0x10, 0x10},
+		{"PoR in the SMS-DELIVER-REPORT", second & 0x20, 0},
+		{"second octet reserved bits", second >> 6, 0},
+	} {
+		if c.got != c.want {
+			t.Errorf("SPI %04x: %s: %#x, want %#x", SPI, c.name, c.got, c.want)
+		}
+	}
+}
+
+// encodeResponse codes r as the card would answer a command of spi: the TP-UDH and TP-UD of its SMS-DELIVER-REPORT
+// (TS 31.115 clause 4.4).
+func encodeResponse(t *testing.T, k Keyset, spi uint16, r Response) (udh, ud []byte) {
+	t.Helper()
+
+	ccLen := 0
+	if spi&spiPoRIntegrity == spiPoRCC {
+		ccLen = k.ccLen()
+	}
+
+	data := r.Data
+	padding := 0
+
+	if spi&spiPoRCiphering != 0 {
+		if rem := (counterLength + 2 + ccLen + len(data)) % k.blockSize(); rem != 0 {
+			padding = k.blockSize() - rem
+			data = append(append([]byte{}, data...), make([]byte, padding)...)
+		}
+	}
+
+	counter := make([]byte, counterLength+2)
+	for i := range counterLength {
+		counter[i] = byte(r.Counter >> (8 * (counterLength - 1 - i)))
+	}
+
+	counter[counterLength], counter[counterLength+1] = byte(padding), byte(r.Status)
+
+	rpl := 1 + 3 + len(counter) + ccLen + len(data)
+	header := []byte{byte(rpl >> 8), byte(rpl), byte(10 + ccLen), r.TAR[0], r.TAR[1], r.TAR[2]}
+
+	var (
+		cc  []byte
+		err error
+	)
+
+	if ccLen > 0 {
+		if cc, err = k.checksum(concat(responseUDH, header, counter, data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body := concat(counter, cc, data)
+
+	if spi&spiPoRCiphering != 0 {
+		if body, err = k.encrypt(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return append([]byte{}, responseUDH...), concat(header, body)
 }
 
 var simRFM = [3]byte{0xb0, 0x00, 0x10}
 
 func TestEncodeCommand(t *testing.T) {
-	counted := secured
-	counted.Counter = CounterHigher
-
 	cases := []struct {
 		name    string
+		spi     uint16
 		command Command
 		want    string
 	}{
 		{
 			name:    "select DF.GSM, get response",
-			command: Command{Keyset: sja5(t), SPI: secured, TAR: simRFM, Data: mustHex(t, "a0a40000027f20a0c0000016")},
+			spi:     secured,
+			command: Command{Keyset: sja5(t), TAR: simRFM, Data: mustHex(t, "a0a40000027f20a0c0000016")},
 			want:    "00281506191515b00010cf71695f686b9516cfee5d0194c605ac9e8baa3b77f0144614068eb3ab557f93",
 		},
 		{
 			name:    "read EF.OPLMNwAcT",
-			command: Command{Keyset: sja5(t), SPI: secured, TAR: simRFM, Data: mustHex(t, "a0a40000027f20a0a40000026f61a0b000000f")},
+			spi:     secured,
+			command: Command{Keyset: sja5(t), TAR: simRFM, Data: mustHex(t, "a0a40000027f20a0a40000026f61a0b000000f")},
 			want:    "00301506191515b000109a46af5dbcd005a46055f55440c44512bd230ba12854b987522f687b50bc495d8638822e5edaef0e",
 		},
 		{
 			name:    "counter",
-			command: Command{Keyset: sja5(t), SPI: counted, TAR: simRFM, Counter: 100, Data: mustHex(t, "a0a40000027f20a0c0000016")},
+			spi:     SPI,
+			command: Command{Keyset: sja5(t), TAR: simRFM, Counter: 100, Data: mustHex(t, "a0a40000027f20a0c0000016")},
 			want:    "00281516191515b000108fb60fad7125e0ee4811b11427719bef3eb8b1ef6ecb1b4f326272f85256243e",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			udh, ud, err := tc.command.Encode()
+			udh, ud, err := tc.command.encode(tc.spi)
 			if err != nil {
-				t.Fatalf("Encode: %v", err)
+				t.Fatalf("encode: %v", err)
 			}
 
 			if !bytes.Equal(udh, []byte{0x02, 0x70, 0x00}) {
@@ -104,17 +183,11 @@ func TestEncodeCommand(t *testing.T) {
 }
 
 // TestEncodeCommandAES checks AES ciphering and CMAC against pySim, whose vector has no counter, which TS 102 225
-// forbids with AES and Encode refuses.
+// forbids with AES and SPI always has.
 func TestEncodeCommandAES(t *testing.T) {
-	c := Command{Keyset: pysimAES(t), SPI: secured, TAR: [3]byte{0xb0, 0x00, 0x11}, Data: mustHex(t, "00a40004023f00")}
+	c := Command{Keyset: pysimAES(t), TAR: [3]byte{0xb0, 0x00, 0x11}, Data: mustHex(t, "00a40004023f00")}
 
-	if _, _, err := c.Encode(); err == nil {
-		t.Fatal("expected Encode to refuse AES without a counter")
-	}
-
-	spi, _ := c.SPI.encode()
-
-	_, ud, err := c.encode(spi)
+	_, ud, err := c.encode(secured)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -128,19 +201,11 @@ func TestEncodeCommandRejects(t *testing.T) {
 	short := sja5(t)
 	short.KID = short.KID[:8]
 
-	counted := secured
-	counted.Counter = CounterHigher
-
 	for name, c := range map[string]Command{
-		"key version 0":       {Keyset: Keyset{Algorithm: TripleDES, KIc: sja5(t).KIc, KID: sja5(t).KID}, SPI: secured},
-		"short KID":           {Keyset: short, SPI: secured},
-		"unknown algorithm":   {Keyset: Keyset{Version: 1, Algorithm: 0x9, KIc: sja5(t).KIc, KID: sja5(t).KID}, SPI: secured},
-		"redundancy check":    {Keyset: sja5(t), SPI: SPI{Integrity: IntegrityRC}},
-		"counter without SPI": {Keyset: sja5(t), SPI: secured, Counter: 1},
-		"counter overflow":    {Keyset: sja5(t), SPI: counted, Counter: 1 << 40},
-		"SPI out of range":    {Keyset: sja5(t), SPI: SPI{PoR: 3}},
-		"PoR CC without CC":   {Keyset: sja5(t), SPI: SPI{Ciphering: true, PoRIntegrity: IntegrityCC}},
-		"PoR ciphered alone":  {Keyset: sja5(t), SPI: SPI{Integrity: IntegrityCC, PoRCiphering: true}},
+		"key version 0":     {Keyset: Keyset{Algorithm: TripleDES, KIc: sja5(t).KIc, KID: sja5(t).KID}},
+		"short KID":         {Keyset: short},
+		"unknown algorithm": {Keyset: Keyset{Version: 1, Algorithm: 0x9, KIc: sja5(t).KIc, KID: sja5(t).KID}},
+		"counter overflow":  {Keyset: sja5(t), Counter: 1 << 40},
 	} {
 		if _, _, err := c.Encode(); err == nil {
 			t.Fatalf("%s: expected an error", name)
@@ -148,24 +213,12 @@ func TestEncodeCommandRejects(t *testing.T) {
 	}
 }
 
-// TestEncodeCommandCipheredWithoutCC checks pySim's ciphered command without CC through encode: its SPI asks for a
-// PoR with a CC, which TS 102 225 clause 5.1.1 forbids for a command without one, so Encode refuses it. pySim sets the
-// unused KID to the key set; it is zero here (TS 102 225 clause 5.1).
+// TestEncodeCommandCipheredWithoutCC checks pySim's ciphered command without CC, of SPI '04 19'. pySim sets the unused
+// KID to the key set; it is zero here (TS 102 225 clause 5.1).
 func TestEncodeCommandCipheredWithoutCC(t *testing.T) {
-	c := Command{
-		Keyset: pysim3DES(t),
-		SPI:    SPI{Ciphering: true, PoR: PoRAlways, PoRIntegrity: IntegrityCC, PoRCiphering: true},
-		TAR:    [3]byte{0xb0, 0x00, 0x00},
-		Data:   mustHex(t, "00a40000023f00"),
-	}
+	c := Command{Keyset: pysim3DES(t), TAR: [3]byte{0xb0, 0x00, 0x00}, Data: mustHex(t, "00a40000023f00")}
 
-	if _, _, err := c.Encode(); err == nil {
-		t.Fatal("expected Encode to refuse a PoR secured more than its command")
-	}
-
-	spi, _ := c.SPI.encode()
-
-	_, ud, err := c.encode(spi)
+	_, ud, err := c.encode(0x0419)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -180,10 +233,8 @@ func TestEncodeCommandCipheredWithoutCC(t *testing.T) {
 func TestCCLength(t *testing.T) {
 	k := pysimAES(t)
 	k.CCLength = 4
-	counted := secured
-	counted.Counter = CounterHigher
 
-	c := Command{Keyset: k, SPI: counted, TAR: [3]byte{0xb0, 0x00, 0x01}, Counter: 7, Data: mustHex(t, "00a4000c026f61")}
+	c := Command{Keyset: k, TAR: [3]byte{0xb0, 0x00, 0x01}, Counter: 7, Data: mustHex(t, "00a4000c026f61")}
 
 	_, ud, err := c.Encode()
 	if err != nil {
@@ -194,23 +245,19 @@ func TestCCLength(t *testing.T) {
 		t.Fatalf("CHL = %d, want 17", ud[2])
 	}
 
-	udh, rud, err := EncodeResponse(k, counted, Response{TAR: c.TAR, Counter: 7, Data: mustHex(t, "019000")})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	udh, rud := encodeResponse(t, k, SPI, Response{TAR: c.TAR, Counter: 7, Data: mustHex(t, "019000")})
 	if rud[2] != 10+4 {
 		t.Fatalf("RHL = %d, want 14", rud[2])
 	}
 
-	r, err := DecodeResponse(k, counted, udh, rud)
+	r, err := DecodeResponse(k, udh, rud)
 	if err != nil || r.Status != StatusPoROK || r.Counter != 7 || hex.EncodeToString(r.Data) != "019000" {
 		t.Fatalf("response = %+v, %v", r, err)
 	}
 
 	for _, bad := range []int{2, 16} {
 		k.CCLength = bad
-		if _, _, err := (Command{Keyset: k, SPI: counted, Counter: 1}).Encode(); err == nil {
+		if _, _, err := (Command{Keyset: k, Counter: 1}).Encode(); err == nil {
 			t.Fatalf("CC length %d: expected an error", bad)
 		}
 	}
@@ -225,24 +272,17 @@ func TestStatusString(t *testing.T) {
 }
 
 func TestEncodeCommandTooLong(t *testing.T) {
-	c := Command{Keyset: sja5(t), SPI: secured, TAR: simRFM, Data: make([]byte, 120)}
+	c := Command{Keyset: sja5(t), TAR: simRFM, Data: make([]byte, 120)}
 	if _, _, err := c.Encode(); err == nil {
 		t.Fatal("expected an error")
 	}
 }
 
 func TestDecodeResponse(t *testing.T) {
-	signed := secured
-	signed.PoRCiphering = false
-
-	plain := secured
-	plain.PoRCiphering = false
-	plain.PoRIntegrity = IntegrityNone
-
 	cases := []struct {
 		name     string
 		keyset   Keyset
-		spi      SPI
+		spi      uint16
 		packet   string
 		tar      string
 		status   Status
@@ -305,9 +345,9 @@ func TestDecodeResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := mustHex(t, tc.packet)
 
-			r, err := DecodeResponse(tc.keyset, tc.spi, p[:3], p[3:])
+			r, err := decodeResponse(tc.keyset, tc.spi, p[:3], p[3:])
 			if err != nil {
-				t.Fatalf("DecodeResponse: %v", err)
+				t.Fatalf("decodeResponse: %v", err)
 			}
 
 			if hex.EncodeToString(r.TAR[:]) != tc.tar || r.Status != tc.status || hex.EncodeToString(r.Data) != tc.data ||
@@ -323,7 +363,7 @@ func TestDecodeResponse(t *testing.T) {
 func TestDecodeResponseWithoutUDHI(t *testing.T) {
 	p := mustHex(t, "027100005412b000109996c2cab4a3302b80c88fe8c5d47462074bd5d39df6ae0016fb515839a2fad763fe44982996c31bc5ff2d1f49356c6800431e439638557e8f43e0ea30aa91057a2667679025c0fcc449ddc873ee0347")
 
-	r, err := DecodeResponse(sja5(t), secured, nil, p)
+	r, err := decodeResponse(sja5(t), secured, nil, p)
 	if err != nil {
 		t.Fatalf("DecodeResponse: %v", err)
 	}
@@ -333,14 +373,12 @@ func TestDecodeResponseWithoutUDHI(t *testing.T) {
 	}
 }
 
-// TestEncodeResponse reproduces the PoRs of the SJA5 and of pySim's tests from their decoded content.
+// TestEncodeResponse reproduces the PoRs of the SJA5 and of pySim's tests from their decoded content, which checks
+// the tests' encodeResponse.
 func TestEncodeResponse(t *testing.T) {
-	signed := secured
-	signed.PoRCiphering = false
-
 	for _, tc := range []struct {
 		keyset Keyset
-		spi    SPI
+		spi    uint16
 		packet string
 	}{
 		{sja5(t), secured, "027100002c12b0001023dd41b55fb14f5e7726736aeb0bd69e4743f58b520e4f3bc42ca3f66b789b404fb60c953eff1625"},
@@ -350,35 +388,29 @@ func TestEncodeResponse(t *testing.T) {
 	} {
 		p := mustHex(t, tc.packet)
 
-		r, err := DecodeResponse(tc.keyset, tc.spi, p[:3], p[3:])
+		r, err := decodeResponse(tc.keyset, tc.spi, p[:3], p[3:])
 		if err != nil {
-			t.Fatalf("DecodeResponse %s: %v", tc.packet, err)
+			t.Fatalf("decodeResponse %s: %v", tc.packet, err)
 		}
 
-		udh, ud, err := EncodeResponse(tc.keyset, tc.spi, r)
-		if err != nil {
-			t.Fatalf("EncodeResponse: %v", err)
-		}
+		udh, ud := encodeResponse(t, tc.keyset, tc.spi, r)
 
 		if got := hex.EncodeToString(append(udh, ud...)); got != tc.packet {
-			t.Fatalf("EncodeResponse = %s, want %s", got, tc.packet)
+			t.Fatalf("encodeResponse = %s, want %s", got, tc.packet)
 		}
 	}
 }
 
 func TestDecodeResponseRejectsBadChecksum(t *testing.T) {
-	signed := secured
-	signed.PoRCiphering = false
-
 	p := mustHex(t, "027100001612b000110000000000000055f47118381175fb02612f")
-	if _, err := DecodeResponse(pysim3DES(t), signed, p[:3], p[3:]); !errors.Is(err, ErrIntegrity) {
+	if _, err := decodeResponse(pysim3DES(t), signed, p[:3], p[3:]); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("err = %v, want ErrIntegrity", err)
 	}
 }
 
 func TestDecodeResponseRejectsCommand(t *testing.T) {
 	p := mustHex(t, "02700000281506191515b00010cf71695f686b9516cfee5d0194c605ac9e8baa3b77f0144614068eb3ab557f93")
-	if _, err := DecodeResponse(sja5(t), secured, p[:3], p[3:]); !errors.Is(err, ErrNotResponse) {
+	if _, err := DecodeResponse(sja5(t), p[:3], p[3:]); !errors.Is(err, ErrNotResponse) {
 		t.Fatalf("err = %v, want ErrNotResponse", err)
 	}
 }

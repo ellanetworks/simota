@@ -30,20 +30,13 @@ func TestScript(t *testing.T) {
 		script *Script
 		want   string
 	}{
-		// The scripts a sysmoISIM-SJA5 ran through its SIM RFM application.
-		{"GSM select, get response", NewScript(ClassGSM).Select(0x7f20).GetResponse(), "a0a40000027f20a0c0000000"},
-		{
-			"GSM update slot 2, read it back",
-			NewScript(ClassGSM).Select(0x7f20).Select(FileOPLMNwAcT).UpdateBinary(SlotOffset(2), entry).ReadBinary(SlotOffset(2), 5),
-			"a0a40000027f20a0a40000026f61a0d600050599f9994800a0b0000505",
-		},
-		{"UICC select for the FCP", NewScript(ClassUICC).SelectFCP(FileOPLMNwAcT).GetResponse(), "00a40004026f6100c0000000"},
+		{"UICC select for the FCP", NewScript().SelectFCP(FileOPLMNwAcT).GetResponse(), "00a40004026f6100c0000000"},
 		{
 			"UICC update slot 51, read it back",
-			NewScript(ClassUICC).Select(FileOPLMNwAcT).UpdateBinary(SlotOffset(51), entry).ReadBinary(SlotOffset(51), 5),
+			NewScript().Select(FileOPLMNwAcT).UpdateBinary(SlotOffset(51), entry).ReadBinary(SlotOffset(51), 5),
 			"00a4000c026f6100d600fa0599f999480000b000fa05",
 		},
-		{"UICC read a chunk", NewScript(ClassUICC).Select(FileOPLMNwAcT).ReadBinary(120, 120), "00a4000c026f6100b0007878"},
+		{"UICC read a chunk", NewScript().Select(FileOPLMNwAcT).ReadBinary(120, 120), "00a4000c026f6100b0007878"},
 	}
 
 	for _, tc := range cases {
@@ -60,16 +53,15 @@ func TestScript(t *testing.T) {
 
 func TestScriptRejects(t *testing.T) {
 	for name, s := range map[string]*Script{
-		"empty":                   NewScript(ClassUICC),
-		"command after read":      NewScript(ClassUICC).ReadBinary(0, 5).Select(FileOPLMNwAcT),
-		"read without length":     NewScript(ClassUICC).ReadBinary(0, 0),
-		"read offset as SFI":      NewScript(ClassUICC).ReadBinary(0x8000, 5),
-		"update offset as SFI":    NewScript(ClassUICC).UpdateBinary(0x8000, []byte{1}),
-		"empty update":            NewScript(ClassUICC).UpdateBinary(0, nil),
-		"get response alone":      NewScript(ClassUICC).GetResponse(),
-		"get response after read": NewScript(ClassUICC).Select(FileOPLMNwAcT).UpdateBinary(0, []byte{1}).GetResponse(),
-		"FCP with the GSM class":  NewScript(ClassGSM).SelectFCP(FileOPLMNwAcT).GetResponse(),
-		"update longer than a P3": NewScript(ClassUICC).UpdateBinary(0, make([]byte, 256)),
+		"empty":                   NewScript(),
+		"command after read":      NewScript().ReadBinary(0, 5).Select(FileOPLMNwAcT),
+		"read without length":     NewScript().ReadBinary(0, 0),
+		"read offset as SFI":      NewScript().ReadBinary(0x8000, 5),
+		"update offset as SFI":    NewScript().UpdateBinary(0x8000, []byte{1}),
+		"empty update":            NewScript().UpdateBinary(0, nil),
+		"get response alone":      NewScript().GetResponse(),
+		"get response after read": NewScript().Select(FileOPLMNwAcT).UpdateBinary(0, []byte{1}).GetResponse(),
+		"update longer than a P3": NewScript().UpdateBinary(0, make([]byte, 256)),
 	} {
 		if _, err := s.Bytes(); !errors.Is(err, ErrScript) {
 			t.Fatalf("%s: err = %v, want ErrScript", name, err)
@@ -78,10 +70,9 @@ func TestScriptRejects(t *testing.T) {
 }
 
 func TestCheck(t *testing.T) {
-	read := NewScript(ClassUICC).Select(FileOPLMNwAcT).ReadBinary(0, 5)
-	update := NewScript(ClassUICC).Select(FileOPLMNwAcT).UpdateBinary(0, []byte{1})
-	fcp := NewScript(ClassUICC).SelectFCP(FileOPLMNwAcT).GetResponse()
-	gsm := NewScript(ClassGSM).Select(0x7f20).Select(FileOPLMNwAcT).UpdateBinary(0, []byte{1})
+	read := NewScript().Select(FileOPLMNwAcT).ReadBinary(0, 5)
+	update := NewScript().Select(FileOPLMNwAcT).UpdateBinary(0, []byte{1})
+	fcp := NewScript().SelectFCP(FileOPLMNwAcT).GetResponse()
 
 	cases := []struct {
 		name    string
@@ -101,8 +92,7 @@ func TestCheck(t *testing.T) {
 		{"update after retries", update, "0263c1", true, true},
 		{"update refused", update, "026982", false, false},
 		{"FCP", fcp, "02900062038002003c", true, false},
-		{"GSM update after an internal retry", gsm, "039201", true, true},
-		{"'92 0X' outside the GSM class", update, "029201", false, false},
+		{"update ending on '92 01'", update, "029201", false, false},
 	}
 
 	for _, tc := range cases {

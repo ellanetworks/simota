@@ -17,7 +17,8 @@ import (
 
 // Card is a card of a key file: only what OTA needs. Ki, OPc, PINs, ADM keys and KIKs are left out.
 type Card struct {
-	ICCID   string
+	ICCID string
+	// IMSI is empty when the file has none.
 	IMSI    string
 	KeySets []KeySet
 }
@@ -37,8 +38,8 @@ var (
 var ErrFormat = errors.New("invalid key file")
 
 // Parse reads the cards of a key file whose key sets use algorithm, "3des" or "aes": a key file does not tell it, and
-// key lengths do not either (TS 102 225 clauses 5.1.2, 5.1.3). A card needs an ICCID, an IMSI, and a key set with KIc
-// and KID of the algorithm's length; a key set that lacks either is left out.
+// key lengths do not either (TS 102 225 clauses 5.1.2, 5.1.3). A card needs an ICCID and a key set with KIc and KID of
+// the algorithm's length; a key set that lacks either is left out. The IMSI, informational, is read when given.
 func Parse(r io.Reader, algorithm string) ([]Card, error) {
 	lengths, ok := map[string][]int{"3des": {16}, "aes": {16, 24, 32}}[algorithm]
 	if !ok {
@@ -76,12 +77,12 @@ func Parse(r io.Reader, algorithm string) ([]Card, error) {
 		columns[strings.ToUpper(strings.TrimSpace(name))] = i
 	}
 
-	iccidCol, ok1 := columns["ICCID"]
-	imsiCol, ok2 := columns["IMSI"]
-
-	if !ok1 || !ok2 {
-		return nil, fmt.Errorf("%w: the header needs ICCID and IMSI columns", ErrFormat)
+	iccidCol, ok := columns["ICCID"]
+	if !ok {
+		return nil, fmt.Errorf("%w: the header needs an ICCID column", ErrFormat)
 	}
+
+	imsiCol, hasIMSI := columns["IMSI"]
 
 	var cards []Card
 
@@ -100,12 +101,16 @@ func Parse(r io.Reader, algorithm string) ([]Card, error) {
 			return ""
 		}
 
-		c := Card{ICCID: NormalICCID(field(iccidCol)), IMSI: field(imsiCol)}
+		c := Card{ICCID: NormalICCID(field(iccidCol))}
+		if hasIMSI {
+			c.IMSI = field(imsiCol)
+		}
+
 		if !iccidRE.MatchString(c.ICCID) {
 			return nil, fmt.Errorf("%w: line %d: invalid ICCID %q", ErrFormat, line, c.ICCID)
 		}
 
-		if !imsiRE.MatchString(c.IMSI) {
+		if c.IMSI != "" && !imsiRE.MatchString(c.IMSI) {
 			return nil, fmt.Errorf("%w: line %d: invalid IMSI %q", ErrFormat, line, c.IMSI)
 		}
 

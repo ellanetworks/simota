@@ -19,18 +19,6 @@ import (
 	"github.com/ellanetworks/smsc/smpp"
 )
 
-// SPI is the security of the commands and of the PoRs: ciphering, a cryptographic checksum, and a counter that must
-// be higher than the card's, which protects against replay and which AES requires (TS 102 225 clauses 5.1.1, 5.1.2);
-// a ciphered PoR with a cryptographic checksum in the SMS-DELIVER-REPORT.
-var SPI = ota.SPI{
-	Integrity:    ota.IntegrityCC,
-	Ciphering:    true,
-	Counter:      ota.CounterHigher,
-	PoR:          ota.PoRAlways,
-	PoRIntegrity: ota.IntegrityCC,
-	PoRCiphering: true,
-}
-
 // ReadChunk is the most file octets a read command asks for: 25 entries. The PoR, with its header, a CC of 8 octets,
 // the compact response header and the data padded to the cipher block, then fits the 159 octets of the
 // SMS-DELIVER-REPORT's TP-UD (TS 23.040 clause 9.2.2.1a); a larger one would come by SMS-SUBMIT (TS 31.115 clause 4.1).
@@ -75,12 +63,12 @@ const (
 // a null length (TS 31.115 clause 4.4).
 var responseUDH = []byte{0x02, 0x71, 0x00}
 
-// answerGrace is how long past the validity of its command a sent job waits, while bound, for the card's answer or the
-// SMSC's receipt before it is closed without a PoR. The SMSC sends the receipt when it gives up on the message, at the
-// end of the validity, and sends a deliver_sm again when simota answers it with a temporary error or is unbound. SMPP
-// 3.4 leaves the SMSC's retry schedule open; Ella SMSC doubles its interval up to 1 hour, so 6 hours leave room for
-// several retries at the longest interval of such a schedule. A PoR that comes later is still recorded (see
-// AwaitingPoR), so the grace only bounds how long a job shows as sent.
+// answerGrace is how long past the validity a sent job waits, while bound, for the card's answer or the SMSC's
+// receipt before it is closed without a PoR. The SMSC sends the receipt when it gives up on the message, at the end of
+// the validity, and sends a deliver_sm again when simota answers it with a temporary error or is unbound. SMPP 3.4
+// leaves the SMSC's retry schedule open; Ella SMSC doubles its interval up to 1 hour, so 6 hours leave room for
+// several retries at the longest interval of such a schedule. A PoR that comes later still gives the job its outcome
+// (see record), so the grace only bounds how long a job shows as sent, and the validity is the one set now.
 const answerGrace = 6 * time.Hour
 
 // MaxValidity is the longest validity of a command: 99 days, the most that a relative validity_period with
@@ -88,7 +76,9 @@ const answerGrace = 6 * time.Hour
 const MaxValidity = 99 * 24 * time.Hour
 
 // After the SMSC throttles simota or has its queue full, the runner sends nothing for a backoff that doubles from
-// minBackoff to maxBackoff, and a command that the SMSC fails to take maxAttempts times fails.
+// minBackoff to maxBackoff. A command that the SMSC fails to take maxAttempts times fails: without a bound, an SMSC
+// that keeps answering ESME_RSYSERR or timing out would hold the card's job queued forever, and the backoff alone only
+// slows that down. The count is on the job, so a restart does not reset it.
 const (
 	minBackoff  = 10 * time.Second
 	maxBackoff  = 5 * time.Minute
@@ -101,12 +91,11 @@ type Store interface {
 	JobsIn(ctx context.Context, status db.JobStatus, limit int) ([]db.Job, error)
 	SentJob(ctx context.Context, messageID string) (db.Job, error)
 	AwaitingPoR(ctx context.Context, msisdn string, tar []byte) ([]db.Job, error)
-	MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte, expiresAt time.Time) error
+	MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte) error
+	CountAttempt(ctx context.Context, id int64) (int, error)
 	AdvanceJob(ctx context.Context, j db.Job) error
 	FinishJob(ctx context.Context, j db.Job) error
-	ExpireJob(ctx context.Context, j db.Job) error
 	ReviseJob(ctx context.Context, j db.Job) error
-	ResumeJob(ctx context.Context, j db.Job) error
 }
 
 // SMSC is the SMPP session to the SMSC.
@@ -151,19 +140,15 @@ type Runner struct {
 
 	// The fields below are Step's.
 	//
-	// boundSince is when Step first saw the session bound, zero while unbound. attempts counts the failed submits of
-	// a job's current command. holdUntil ends the backoff after a throttling, of length backoff.
+	// boundSince is when Step first saw the session bound, zero while unbound. holdUntil ends the backoff after a
+	// throttling, of length backoff.
 	boundSince time.Time
-	attempts   map[int64]int
 	holdUntil  time.Time
 	backoff    time.Duration
 }
 
 func NewRunner(store Store, connect func(ctx context.Context) (Gateway, error), interval time.Duration, logger *slog.Logger) *Runner {
-	return &Runner{
-		Store: store, Connect: connect, Interval: interval, Logger: logger, wake: make(chan struct{}, 1),
-		attempts: map[int64]int{},
-	}
+	return &Runner{Store: store, Connect: connect, Interval: interval, Logger: logger, wake: make(chan struct{}, 1)}
 }
 
 func (r *Runner) now() time.Time {
@@ -224,7 +209,7 @@ func (r *Runner) Step(ctx context.Context) {
 		r.boundSince = r.now()
 	}
 
-	r.sweep(ctx)
+	r.sweep(ctx, gw.Validity)
 
 	if r.now().Before(r.holdUntil) {
 		return
@@ -243,9 +228,10 @@ func (r *Runner) Step(ctx context.Context) {
 	}
 }
 
-// sweep closes, without a PoR, the sent jobs answered by nothing answerGrace past the validity of their command, nor
-// in answerGrace of being bound, which leaves the SMSC time to send what it held while simota was unbound.
-func (r *Runner) sweep(ctx context.Context) {
+// sweep closes, without a PoR, the sent jobs answered by nothing answerGrace past the validity, nor in answerGrace of
+// being bound, which leaves the SMSC time to send what it held while simota was unbound. It holds r.mu, so that no
+// deliver_sm changes a job between its listing and its closing.
+func (r *Runner) sweep(ctx context.Context, validity time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -261,19 +247,16 @@ func (r *Runner) sweep(ctx context.Context) {
 	}
 
 	for _, j := range sent {
-		if now.Sub(j.ExpiresAt) <= answerGrace {
+		// A sent job's updated_at is when its current command was sent.
+		if now.Sub(j.UpdatedAt) <= validity+answerGrace {
 			continue
 		}
 
 		next := noPoR(j, "no PoR and no delivery receipt from the SMSC within the validity of the message")
 		next.PoRMissing = true
 
-		switch err := r.Store.ExpireJob(ctx, next); {
-		case errors.Is(err, db.ErrNotFound):
-		case err != nil:
+		if err := r.finish(ctx, next); err != nil {
 			r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
-		default:
-			r.logFinished(next)
 		}
 	}
 }
@@ -305,7 +288,7 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 		return true
 	}
 
-	cmd := ota.Command{Keyset: keyset, SPI: SPI, Counter: counter, Data: data}
+	cmd := ota.Command{Keyset: keyset, Counter: counter, Data: data}
 	copy(cmd.TAR[:], j.TAR)
 
 	udh, ud, err := cmd.Encode()
@@ -330,7 +313,6 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 		r.Logger.Debug("not bound to the SMSC, jobs wait", slog.Int64("job", j.ID))
 		return false
 	case Rejected(err):
-		delete(r.attempts, j.ID)
 		r.fail(ctx, j, fmt.Sprintf("SMSC refused the message: %v", err))
 
 		return true
@@ -345,12 +327,10 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 	// higher counter. The card executes it as a new command (TS 102 225 clause 5.1.4), which is harmless: a command
 	// writes the same entry and reads it back, or reads. The first message's PoR carries the spent counter, so it
 	// answers no job's command and is left aside; a duplicate never reuses a counter, which the card would refuse.
-	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage, r.now().Add(gw.Validity)); err != nil {
+	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage); err != nil {
 		r.Logger.Error("failed to mark job sent", slog.Int64("job", j.ID), slog.String("message", id), slog.Any("error", err))
 		return r.retry(ctx, j, fmt.Errorf("record message %s: %w", id, err))
 	}
-
-	delete(r.attempts, j.ID)
 
 	return true
 }
@@ -358,16 +338,17 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 // retry counts a failed submit of a job's command and fails the job at the maxAttempts-th. After a throttling or a
 // full queue (SMPP 3.4 section 5.1.3), it backs off and stops the batch; while the SMSC unbinds, it stops it too.
 func (r *Runner) retry(ctx context.Context, j db.Job, err error) bool {
-	r.attempts[j.ID]++
-	if r.attempts[j.ID] >= maxAttempts {
-		delete(r.attempts, j.ID)
-		r.fail(ctx, j, fmt.Sprintf("the SMSC did not take the message in %d attempts: %v", maxAttempts, err))
+	n, cerr := r.Store.CountAttempt(ctx, j.ID)
+	if cerr != nil {
+		r.Logger.Error("failed to count a submit attempt", slog.Int64("job", j.ID), slog.Any("error", cerr))
+	}
 
+	if n >= maxAttempts {
+		r.fail(ctx, j, fmt.Sprintf("the SMSC did not take the message in %d attempts: %v", maxAttempts, err))
 		return true
 	}
 
-	r.Logger.Warn("failed to submit job, will retry", slog.Int64("job", j.ID), slog.Int("attempt", r.attempts[j.ID]),
-		slog.Any("error", err))
+	r.Logger.Warn("failed to submit job, will retry", slog.Int64("job", j.ID), slog.Int("attempt", n), slog.Any("error", err))
 
 	var se *smpp.StatusError
 	if !errors.As(err, &se) {
@@ -581,7 +562,7 @@ func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM, packet []byte) e
 			continue
 		}
 
-		resp, err := ota.DecodeResponse(keyset, SPI, udh, ud)
+		resp, err := ota.DecodeResponse(keyset, udh, ud)
 		if err != nil {
 			decodeErr = err
 			continue
@@ -606,8 +587,8 @@ func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM, packet []byte) e
 }
 
 // record records the PoR of a job's last command: on a sent job, its outcome or next command; on a job closed
-// without a PoR, the outcome that replaces the one given without it, or its next command when its card has no other
-// job in progress.
+// without a PoR, the outcome that replaces the one given without it. A read closed without the PoR to one of its steps
+// stays failed when the PoR is not its last: its operator runs it again.
 func (r *Runner) record(ctx context.Context, j db.Job, resp ota.Response, packet []byte) error {
 	next, final := Outcome(j, resp, packet)
 
@@ -625,22 +606,12 @@ func (r *Runner) record(ctx context.Context, j db.Job, resp ota.Response, packet
 		return nil
 	}
 
-	r.Logger.Info("a late PoR answers a job closed without it", slog.Int64("job", j.ID), slog.String("was", string(j.Status)))
-
 	if !final {
-		err := r.Store.ResumeJob(ctx, next)
-		if err == nil {
-			r.Wake()
-			return nil
-		}
-
-		if !errors.Is(err, db.ErrNotFound) {
-			return fmt.Errorf("resume job %d: %w", j.ID, err)
-		}
-
-		next.Status = db.JobFailed
-		next.Error = fmt.Sprintf("a late PoR answered command %d, but the card has another job in progress", j.Step+1)
+		r.Logger.Info("ignoring a late PoR to a step of a read closed without it", slog.Int64("job", j.ID))
+		return nil
 	}
+
+	r.Logger.Info("a late PoR answers a job closed without it", slog.Int64("job", j.ID), slog.String("was", string(j.Status)))
 
 	next.PoRMissing = false
 
@@ -881,7 +852,7 @@ func advance(j db.Job, data []byte) (db.Job, bool) {
 //   - a set or a clear writes its slot of EF.OPLMNwAcT and reads it back;
 //   - a read first gets the file's FCP for its size, then reads the file in chunks of ReadChunk octets.
 func Script(j db.Job) (*rfm.Script, error) {
-	s := rfm.NewScript(rfm.ClassUICC)
+	s := rfm.NewScript()
 
 	switch j.Operation {
 	case db.OperationOPLMNRead:

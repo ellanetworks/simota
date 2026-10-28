@@ -15,12 +15,11 @@ var commandUDH = []byte{0x02, 0x70, 0x00}
 // counterLength is the length of CNTR (TS 102 225 clause 5.1).
 const counterLength = 5
 
-// Command is an application message for the card application at TAR, secured with a key set.
+// Command is an application message for the card application at TAR, secured with a key set as SPI asks.
 type Command struct {
 	Keyset Keyset
-	SPI    SPI
 	TAR    [3]byte
-	// Counter is the CNTR. It must be zero when the SPI asks for no counter.
+	// Counter is the CNTR.
 	Counter uint64
 	// Data is the application message, such as a remote management script (TS 102 226).
 	Data []byte
@@ -33,46 +32,27 @@ func (c Command) Encode() (udh, ud []byte, err error) {
 		return nil, nil, fmt.Errorf("command: %w", err)
 	}
 
-	spi, err := c.SPI.encode()
-	if err != nil {
-		return nil, nil, fmt.Errorf("command: %w", err)
-	}
-
-	if c.SPI.Integrity != IntegrityNone && c.SPI.Integrity != IntegrityCC {
-		return nil, nil, errors.New("command: only a cryptographic checksum or no integrity is supported")
-	}
-
-	if c.Keyset.Algorithm == AES && c.SPI.Counter != CounterHigher && c.SPI.Counter != CounterOneHigher {
-		// TS 102 225 clauses 5.1.2, 5.1.3.1.
-		return nil, nil, errors.New("command: AES needs a counter that must be higher or one higher")
-	}
-
-	if err := c.SPI.validatePoR(); err != nil {
-		return nil, nil, fmt.Errorf("command: %w", err)
-	}
-
-	return c.encode(spi)
+	return c.encode(SPI)
 }
 
-// encode is Encode without the checks of the SPI against the key set.
-func (c Command) encode(spi [2]byte) (udh, ud []byte, err error) {
-	if c.SPI.Counter == CounterNone && c.Counter != 0 {
-		return nil, nil, errors.New("command: counter set while the SPI asks for none")
-	}
-
+// encode is Encode with another SPI, which only its ciphering and whether it has a cryptographic checksum change, for
+// the tests' vectors.
+func (c Command) encode(spi uint16) (udh, ud []byte, err error) {
 	if c.Counter >= 1<<(8*counterLength) {
 		return nil, nil, errors.New("command: counter exceeds 5 octets")
 	}
 
+	ciphered, checksummed := spi&spiCiphering != 0, spi&spiIntegrity == spiCC
+
 	ccLen := 0
-	if c.SPI.Integrity == IntegrityCC {
+	if checksummed {
 		ccLen = c.Keyset.ccLen()
 	}
 
 	data := c.Data
 	padding := 0
 
-	if c.SPI.Ciphering {
+	if ciphered {
 		// Ciphering covers CNTR, PCNTR, the CC and the secured data.
 		if r := (counterLength + 1 + ccLen + len(data)) % c.Keyset.blockSize(); r != 0 {
 			padding = c.Keyset.blockSize() - r
@@ -85,8 +65,8 @@ func (c Command) encode(spi [2]byte) (udh, ud []byte, err error) {
 	cpl := 1 + chl + len(data)
 
 	header := []byte{
-		byte(cpl >> 8), byte(cpl), byte(chl), spi[0], spi[1], c.Keyset.keyID(c.SPI.Ciphering),
-		c.Keyset.keyID(c.SPI.Integrity == IntegrityCC), c.TAR[0], c.TAR[1], c.TAR[2],
+		byte(cpl >> 8), byte(cpl), byte(chl), byte(spi >> 8), byte(spi), c.Keyset.keyID(ciphered),
+		c.Keyset.keyID(checksummed), c.TAR[0], c.TAR[1], c.TAR[2],
 	}
 
 	counter := make([]byte, counterLength+1)
@@ -108,7 +88,7 @@ func (c Command) encode(spi [2]byte) (udh, ud []byte, err error) {
 
 	secured := concat(counter, cc, data)
 
-	if c.SPI.Ciphering {
+	if ciphered {
 		secured, err = c.Keyset.encrypt(secured)
 		if err != nil {
 			return nil, nil, fmt.Errorf("command: %w", err)

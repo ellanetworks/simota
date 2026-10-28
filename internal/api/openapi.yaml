@@ -82,10 +82,10 @@ paths:
       summary: Import cards
       description: >-
         Stores the cards of a vendor's key file, such as sysmocom's: a header row, then a row per card, separated by
-        tabs or commas. The ICCID, IMSI, KIC<n> and KID<n> columns are read; Ki, OPc, PINs, ADM keys and KIKs are
-        ignored. A key set without both KIC and KID is left out. A key file does not tell the key sets' algorithm,
+        tabs or commas. The ICCID, KIC<n> and KID<n> columns are read, and the IMSI column if there is one; Ki, OPc,
+        PINs, ADM keys and KIKs are ignored. A key set without both KIC and KID is left out. A key file does not tell the key sets' algorithm,
         which the algorithm parameter gives (ETSI TS 102 225 clauses 5.1.2, 5.1.3). A new card gets the TAR b00001 and
-        its first key set; an existing card gets the file's IMSI and key sets and keeps its MSISDN, description, TAR,
+        its first key set; an existing card gets the file's IMSI, if given, and key sets and keeps its MSISDN, description, TAR,
         counters, and key set choice if the file still has that key set. The import stores all the cards or none.
       parameters:
         - name: algorithm
@@ -425,13 +425,14 @@ components:
   schemas:
     Card:
       type: object
-      required: [iccid, imsi, msisdn, description, tar, kvn, key_sets, created_at, updated_at]
+      required: [iccid, msisdn, description, tar, kvn, key_sets, created_at, updated_at]
       properties:
         iccid:
           type: string
           examples: ["8949440000001659208"]
         imsi:
           type: string
+          description: Informational, absent when unknown; OTA messages go to the MSISDN.
           examples: ["001010000000001"]
         msisdn:
           type: string
@@ -499,11 +500,12 @@ components:
           type: string
     CardUpdate:
       type: object
-      required: [imsi, tar, kvn]
+      required: [tar, kvn]
       properties:
         imsi:
           type: string
-          pattern: "^[0-9]{6,15}$"
+          pattern: "^([0-9]{6,15})?$"
+          description: Optional and informational; absent or empty for none.
         msisdn:
           type: string
         description:
@@ -624,7 +626,8 @@ components:
             it after its next USIM initialisation or a REFRESH (ETSI TS 102 226 clause 4). unconfirmed when a set or a
             clear may have taken effect without a PoR that tells, such as one the card sends later by SMS-SUBMIT.
             failed otherwise. A job closed by a delivery receipt or by the deadline, without a PoR, takes the outcome of
-            a PoR that comes later with its last command's TAR and counter.
+            a PoR that comes later with its last command's TAR and counter; a read stays failed when that PoR is to
+            one of its steps but the last, and is to be run again.
         step:
           type: integer
           description: The index of the job's current command.

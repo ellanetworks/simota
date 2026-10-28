@@ -3,11 +3,14 @@ package jobs_test
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
+	"crypto/des"
 	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,11 +47,46 @@ func sja5(t *testing.T) db.KeySet {
 	}
 }
 
-func aesKeyset(t *testing.T) ota.Keyset {
-	return ota.Keyset{
-		Version: 2, Algorithm: ota.AES, KIc: mustHex(t, "200102030405060708090a0b0c0d0e0f"),
-		KID: mustHex(t, "201102030405060708090a0b0c0d0e0f"),
+// porPacket is the user data of the card's PoR r, its UDH then its Response Packet, secured with the triple DES key
+// set k as ota.SPI asks: a cryptographic checksum, ciphered (TS 102 225 clause 5.2, TS 31.115 clause 4.4). It is coded
+// apart from package ota, which only decodes PoRs.
+func porPacket(t *testing.T, k ota.Keyset, r ota.Response) []byte {
+	t.Helper()
+
+	if k.Algorithm != ota.TripleDES {
+		t.Fatal("porPacket codes triple DES PoRs only")
 	}
+
+	// CBC with a zero IV and two-key triple DES, K1 K2 K1, of data padded with zeros to the block.
+	cbc := func(key, data []byte) []byte {
+		b, err := des.NewTripleDESCipher(slices.Concat(key, key[:8]))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		data = append(data, make([]byte, (des.BlockSize-len(data)%des.BlockSize)%des.BlockSize)...)
+		out := make([]byte, len(data))
+		cipher.NewCBCEncrypter(b, make([]byte, des.BlockSize)).CryptBlocks(out, data)
+
+		return out
+	}
+
+	const ccLength = 8
+
+	udh := []byte{0x02, 0x71, 0x00}
+	padding := (des.BlockSize - (5+2+ccLength+len(r.Data))%des.BlockSize) % des.BlockSize
+	data := append(append([]byte{}, r.Data...), make([]byte, padding)...)
+	counter := []byte{
+		byte(r.Counter >> 32), byte(r.Counter >> 24), byte(r.Counter >> 16), byte(r.Counter >> 8), byte(r.Counter),
+		byte(padding), byte(r.Status),
+	}
+	rpl := 1 + 3 + len(counter) + ccLength + len(data)
+	header := []byte{byte(rpl >> 8), byte(rpl), 10 + ccLength, r.TAR[0], r.TAR[1], r.TAR[2]}
+
+	// The CC covers the UDH, RPL, RHL, TAR, CNTR, PCNTR, the status and the data; ciphering all but the header.
+	mac := cbc(k.KID, slices.Concat(udh, header, counter, data))
+
+	return slices.Concat(udh, header, cbc(k.KIc, slices.Concat(counter, mac[len(mac)-ccLength:], data)))
 }
 
 // fakeSMSC is an SMSC as the runner meets it over SMPP 3.4: a server on a loopback port that the runner's session
@@ -178,12 +216,12 @@ func (s *faultyStore) GetCard(ctx context.Context, iccid string) (db.Card, error
 	return s.DB.GetCard(ctx, iccid)
 }
 
-func (s *faultyStore) MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte, expiresAt time.Time) error {
+func (s *faultyStore) MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte) error {
 	if err := s.fault(&s.markSent); err != nil {
 		return err
 	}
 
-	return s.DB.MarkJobSent(ctx, id, counter, messageID, command, expiresAt)
+	return s.DB.MarkJobSent(ctx, id, counter, messageID, command)
 }
 
 var errDB = errors.New("database is locked")
@@ -244,7 +282,7 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	e.runner.Now = func() time.Time { return e.now }
 
 	e.settings = gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "secret"}
-	e.gw = gateway.New(gateway.Config{Handler: e.runner, MinBackoff: 10 * time.Millisecond, MaxBackoff: 50 * time.Millisecond})
+	e.gw = gateway.New(gateway.Config{Handler: e.runner})
 
 	t.Cleanup(func() { _ = e.gw.Close(context.Background()) })
 
@@ -261,11 +299,10 @@ func (e *env) rebind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := e.gw.WaitBound(ctx); err != nil {
-		t.Fatalf("not bound: %v, %+v", err, e.gw.State())
+	for deadline := time.Now().Add(5 * time.Second); !e.gw.Bound(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("not bound: %+v", e.gw.State())
+		}
 	}
 }
 
@@ -347,12 +384,7 @@ func (e *env) porOf(t *testing.T, tar []byte, counter uint64, status ota.Status,
 	r := ota.Response{Counter: counter, Status: status, Data: mustHex(t, data)}
 	copy(r.TAR[:], tar)
 
-	udh, ud, err := ota.EncodeResponse(e.keyset, jobs.SPI, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return append(udh, ud...)
+	return porPacket(t, e.keyset, r)
 }
 
 // answer makes the SMSC deliver the job's current command and forward the card's PoR, then, as Ella SMSC does, its
@@ -452,14 +484,13 @@ func TestReadLargeFile(t *testing.T) {
 			t.Fatalf("job = %+v after %d messages", j, len(e.smsc.sent()))
 		}
 
-		// Every PoR fits the TP-UD of an SMS-DELIVER-REPORT (TS 23.040 clause 9.2.2.1a).
-		r := ota.Response{Counter: 9, Data: append([]byte{2, 0x90, 0}, bytes.Repeat([]byte{1}, jobs.ReadChunk)...)}
-		copy(r.TAR[:], tar)
-
-		for _, k := range []ota.Keyset{e.keyset, aesKeyset(t)} {
-			udh, ud, err := ota.EncodeResponse(k, jobs.SPI, r)
-			if err != nil || len(udh)+len(ud) > 159 {
-				t.Fatalf("PoR of %d octets, %v", len(udh)+len(ud), err)
+		// Every PoR fits the TP-UD of an SMS-DELIVER-REPORT (TS 23.040 clause 9.2.2.1a): the UDH, RPL, RHL and TAR,
+		// then CNTR, PCNTR, the status, a CC of 8 octets and the compact response of a chunk, ciphered to the block of
+		// triple DES or AES.
+		for _, block := range []int{8, 16} {
+			secured := 5 + 2 + 8 + 3 + jobs.ReadChunk
+			if n := 3 + 6 + secured + (block-secured%block)%block; n > 159 {
+				t.Fatalf("PoR of %d octets with blocks of %d", n, block)
 			}
 		}
 	})
@@ -802,7 +833,7 @@ func TestReceiptCorrelation(t *testing.T) {
 }
 
 // TestReceiptBeforePoR checks an SMSC that sends the receipt before the card's answer: the receipt closes the job
-// without a PoR, and the PoR, matched by TAR and counter, then gives its outcome, or resumes a read.
+// without a PoR, and the PoR, matched by TAR and counter, then gives its outcome.
 func TestReceiptBeforePoR(t *testing.T) {
 	t.Run("write", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
@@ -824,30 +855,25 @@ func TestReceiptBeforePoR(t *testing.T) {
 		}
 	})
 
-	t.Run("read", func(t *testing.T) {
+	// A read closed without the PoR to a step stays failed when the PoR is not its last; the operator runs it again.
+	t.Run("read step", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
-		e.generic = true
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
 		e.step()
 
 		j := e.job(t, id)
 		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
-		e.answer(t, id, ota.StatusPoROK, fcp(5))
-
-		if j := e.job(t, id); j.Status != db.JobQueued || j.Step != 1 || j.FileSize != 5 {
-			t.Fatalf("after the PoR, job = %+v", j)
-		}
-
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, fcp(5))))
 		e.step()
-		e.answer(t, id, ota.StatusPoROK, "02"+"9000"+"00f110ffff")
 
-		if j := e.job(t, id); j.Status != db.JobSucceeded {
+		if j := e.job(t, id); j.Status != db.JobFailed || j.FileSize != -1 || len(e.smsc.sent()) != 1 {
 			t.Fatalf("job = %+v", j)
 		}
 	})
 
-	t.Run("read of a card with another job", func(t *testing.T) {
+	// The PoR of a read's last command still gives its outcome.
+	t.Run("read refused", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 
@@ -855,10 +881,9 @@ func TestReceiptBeforePoR(t *testing.T) {
 
 		j := e.job(t, id)
 		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
-		e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
-		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, fcp(5))))
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusCounterLow, "")))
 
-		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "another job") || j.FileSize != 5 {
+		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "counter_low") || j.PoRMissing {
 			t.Fatalf("job = %+v", j)
 		}
 	})
@@ -928,23 +953,6 @@ func TestNoTimeoutWhileUnbound(t *testing.T) {
 	e.step()
 
 	if j := e.job(t, id); j.Status != db.JobUnconfirmed {
-		t.Fatalf("job = %+v", j)
-	}
-}
-
-// TestDeadlineOfTheMessage checks that the deadline is the validity a command was sent with, not the one set since
-// (review L9).
-func TestDeadlineOfTheMessage(t *testing.T) {
-	e := newEnv(t, "+15550000001", sja5(t))
-	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
-
-	e.step()
-
-	e.validity = time.Hour
-	e.now = e.now.Add(10 * time.Hour)
-	e.step()
-
-	if j := e.job(t, id); j.Status != db.JobSent || !j.ExpiresAt.After(j.UpdatedAt.Add(23*time.Hour)) {
 		t.Fatalf("job = %+v", j)
 	}
 }
@@ -1050,16 +1058,28 @@ func TestMarkSentFails(t *testing.T) {
 	}
 }
 
-// TestAES runs a job on an AES key set with 4-octet checksums, which needs the counter (TS 102 225 clause 5.1.2).
+// TestAES runs a job on an AES key set with 4-octet checksums, which needs the counter (TS 102 225 clause 5.1.2): the
+// command's KIc and KID tell AES and the key set, and its CHL the checksum length; the PoR, of counter 1, is the one
+// package ota's tests code for the key set of pySim's AES tests.
 func TestAES(t *testing.T) {
+	por := mustHex(t, "02710000240eb000019fa071ecd80a05e3550a7054feb488f5663864ee046ddd165b39ca3b3f118856")
+
 	forms(t, func(t *testing.T, generic bool) {
-		k := aesKeyset(t)
-		e := newEnv(t, "+15550000001", db.KeySet{Version: 2, Algorithm: "aes", KIc: k.KIc, KID: k.KID, CCLength: 4})
+		e := newEnv(t, "+15550000001", db.KeySet{
+			Version: 2, Algorithm: "aes", KIc: mustHex(t, "200102030405060708090a0b0c0d0e0f"),
+			KID: mustHex(t, "201102030405060708090a0b0c0d0e0f"), CCLength: 4,
+		})
 		e.generic = generic
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
 
 		e.step()
-		e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
+
+		j := e.job(t, id)
+		if c := j.Command; c[5] != 13+4 || c[6] != 0x16 || c[7] != 0x19 || c[8] != 0x22 || c[9] != 0x22 || j.Counter != 1 {
+			t.Fatalf("command %x", c)
+		}
+
+		e.smsc.deliver(t, e.simAnswer(j, por))
 		e.step()
 
 		if j := e.job(t, id); j.Status != db.JobSucceeded {
@@ -1147,7 +1167,10 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("the batch went on to the next job, counter %d", n)
 		}
 
-		e.step()
+		// The attempts are counted on the job: a restarted runner fails it at the tenth.
+		restarted := jobs.NewRunner(e.faults, e.runner.Connect, time.Hour, slog.New(slog.DiscardHandler))
+		restarted.Now = e.runner.Now
+		restarted.Step(context.Background())
 
 		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "10 attempts") {
 			t.Fatalf("job = %+v", j)

@@ -2,90 +2,21 @@
 // sends in an SMS-DELIVER, and the Response Packet (PoR) that the card answers with (ETSI TS 102 225, 3GPP TS 31.115).
 package ota
 
-import (
-	"errors"
-	"fmt"
-)
+// SPI is the Security Parameter Indicator of every Command Packet that simota sends (TS 102 225 clause 5.1.1, TS
+// 31.115 clause 4.2):
+//
+//   - first octet '16': a cryptographic checksum (b2-b1 = 10), ciphering (b3 = 1), and a counter that must be higher
+//     than the card's (b5-b4 = 10), which protects against replay and which AES requires (TS 102 225 clause 5.1.2);
+//   - second octet '19': a PoR always (b2-b1 = 01), with a cryptographic checksum (b4-b3 = 10), ciphered (b5 = 1), in
+//     the SMS-DELIVER-REPORT (b6 = 0).
+const SPI uint16 = 0x1619
 
-// Integrity is the redundancy check, cryptographic checksum or digital signature of a packet (TS 102 225 clause
-// 5.1.1).
-type Integrity uint8
-
+// The bits of an SPI that the coding of the packets depends on (TS 102 225 clause 5.1.1).
 const (
-	IntegrityNone Integrity = 0
-	IntegrityRC   Integrity = 1
-	IntegrityCC   Integrity = 2
-	IntegrityDS   Integrity = 3
+	spiIntegrity    = 0x0300
+	spiCC           = 0x0200
+	spiCiphering    = 0x0400
+	spiPoRIntegrity = 0x000c
+	spiPoRCC        = 0x0008
+	spiPoRCiphering = 0x0010
 )
-
-// CounterMode is how the card checks the counter of a Command Packet (TS 102 225 clause 5.1.1).
-type CounterMode uint8
-
-const (
-	CounterNone CounterMode = 0
-	// CounterAvailable makes the counter available for information, without replay checking.
-	CounterAvailable CounterMode = 1
-	// CounterHigher requires the counter to be higher than the card's.
-	CounterHigher CounterMode = 2
-	// CounterOneHigher requires the counter to be one higher than the card's.
-	CounterOneHigher CounterMode = 3
-)
-
-// PoRMode is whether the card answers with a Proof of Receipt (TS 102 225 clause 5.1.1).
-type PoRMode uint8
-
-const (
-	PoRNone    PoRMode = 0
-	PoRAlways  PoRMode = 1
-	PoROnError PoRMode = 2
-)
-
-// SPI is the Security Parameter Indicator of a Command Packet (TS 102 225 clause 5.1.1, TS 31.115 clause 4.2).
-type SPI struct {
-	Integrity Integrity
-	Ciphering bool
-	Counter   CounterMode
-	PoR       PoRMode
-	// PoRIntegrity, PoRCiphering are the security of the Response Packet.
-	PoRIntegrity Integrity
-	PoRCiphering bool
-	// PoRInSubmit is the PoR sent in an SMS-SUBMIT instead of the SMS-DELIVER-REPORT (TS 31.115 clause 4.2).
-	PoRInSubmit bool
-}
-
-func (s SPI) encode() ([2]byte, error) {
-	if s.Integrity > IntegrityDS || s.PoRIntegrity > IntegrityDS || s.Counter > CounterOneHigher || s.PoR > PoROnError {
-		return [2]byte{}, fmt.Errorf("spi: value out of range: %+v", s)
-	}
-
-	first := byte(s.Integrity) | byte(s.Counter)<<3
-	if s.Ciphering {
-		first |= 0x04
-	}
-
-	second := byte(s.PoR) | byte(s.PoRIntegrity)<<2
-	if s.PoRCiphering {
-		second |= 0x10
-	}
-
-	if s.PoRInSubmit {
-		second |= 0x20
-	}
-
-	return [2]byte{first, second}, nil
-}
-
-// validatePoR checks the security of the PoR against that of the command: when the PoR has a redundancy check,
-// cryptographic checksum or digital signature, it is the command's kind; and a ciphered PoR needs a command with a
-// cryptographic checksum or digital signature, and ciphered (TS 102 225 clause 5.1.1).
-func (s SPI) validatePoR() error {
-	if s.PoRIntegrity != IntegrityNone && s.PoRIntegrity != s.Integrity {
-		return errors.New("spi: the PoR's integrity must be that of the command")
-	}
-
-	if s.PoRCiphering && (!s.Ciphering || (s.Integrity != IntegrityCC && s.Integrity != IntegrityDS)) {
-		return errors.New("spi: a ciphered PoR needs a ciphered command with a cryptographic checksum or signature")
-	}
-
-	return nil
-}

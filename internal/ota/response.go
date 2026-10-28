@@ -73,8 +73,16 @@ type Response struct {
 }
 
 // DecodeResponse decodes the Response Packet in the TP-UDH and TP-UD of an SMS-DELIVER-REPORT or SMS-SUBMIT, secured as
-// the SPI of its command asked (TS 31.115 clause 4.4).
-func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
+// SPI asks (TS 31.115 clause 4.4).
+func DecodeResponse(k Keyset, udh, ud []byte) (Response, error) {
+	return decodeResponse(k, SPI, udh, ud)
+}
+
+// decodeResponse is DecodeResponse of the PoR to a command of another SPI, of which only the PoR's ciphering and
+// integrity matter, for the tests' vectors.
+func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
+	ciphered, integrity := spi&spiPoRCiphering != 0, spi&spiPoRIntegrity
+
 	// The card cannot tell the ME to set the TP-UDHI of its Response Packet, so a Response Packet may arrive without
 	// one, and is then read as if it were set (TS 31.115 clause 4.1).
 	if len(udh) == 0 && bytes.HasPrefix(ud, responseUDH) {
@@ -102,7 +110,7 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 	// A card that cannot authenticate the Sending Entity may answer with an error status, no security and a zero
 	// counter (TS 102 225 clause 4.1).
 	if rhl == 10 && len(body) == counterLength+2 && Status(body[counterLength+1]) != StatusPoROK &&
-		bytes.Equal(body[:counterLength], make([]byte, counterLength)) && (spi.PoRCiphering || spi.PoRIntegrity != IntegrityNone) {
+		bytes.Equal(body[:counterLength], make([]byte, counterLength)) && (ciphered || integrity != 0) {
 		r := Response{Status: Status(body[counterLength+1]), Unsecured: true}
 		copy(r.TAR[:], header[3:6])
 
@@ -110,9 +118,9 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 	}
 
 	ccLen := 0
-	if spi.PoRIntegrity == IntegrityCC {
+	if integrity == spiPoRCC {
 		ccLen = k.ccLen()
-	} else if spi.PoRIntegrity != IntegrityNone {
+	} else if integrity != 0 {
 		return Response{}, errors.New("response: only a cryptographic checksum or no integrity is supported")
 	}
 
@@ -121,7 +129,7 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 		return Response{}, fmt.Errorf("response: RHL %d, want %d", rhl, 10+ccLen)
 	}
 
-	if spi.PoRCiphering {
+	if ciphered {
 		var err error
 
 		body, err = k.decrypt(body)
@@ -159,60 +167,4 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 	r.Data = data[:len(data)-padding]
 
 	return r, nil
-}
-
-// EncodeResponse codes r as the card would, secured as spi asks of the PoR: the TP-UDH and TP-UD of its SMS-DELIVER-
-// REPORT (TS 31.115 clause 4.4). It serves to test Sending Entities.
-func EncodeResponse(k Keyset, spi SPI, r Response) (udh, ud []byte, err error) {
-	if err := k.validate(); err != nil {
-		return nil, nil, fmt.Errorf("response: %w", err)
-	}
-
-	if spi.PoRIntegrity != IntegrityNone && spi.PoRIntegrity != IntegrityCC {
-		return nil, nil, errors.New("response: only a cryptographic checksum or no integrity is supported")
-	}
-
-	ccLen := 0
-	if spi.PoRIntegrity == IntegrityCC {
-		ccLen = k.ccLen()
-	}
-
-	data := r.Data
-	padding := 0
-
-	if spi.PoRCiphering {
-		if rem := (counterLength + 2 + ccLen + len(data)) % k.blockSize(); rem != 0 {
-			padding = k.blockSize() - rem
-			data = append(append([]byte{}, data...), make([]byte, padding)...)
-		}
-	}
-
-	counter := make([]byte, counterLength+2)
-	for i := range counterLength {
-		counter[i] = byte(r.Counter >> (8 * (counterLength - 1 - i)))
-	}
-
-	counter[counterLength], counter[counterLength+1] = byte(padding), byte(r.Status)
-
-	rhl := 10 + ccLen
-	rpl := 1 + 3 + len(counter) + ccLen + len(data)
-	header := []byte{byte(rpl >> 8), byte(rpl), byte(rhl), r.TAR[0], r.TAR[1], r.TAR[2]}
-
-	var cc []byte
-
-	if ccLen > 0 {
-		if cc, err = k.checksum(concat(responseUDH, header, counter, data)); err != nil {
-			return nil, nil, fmt.Errorf("response: %w", err)
-		}
-	}
-
-	body := concat(counter, cc, data)
-
-	if spi.PoRCiphering {
-		if body, err = k.encrypt(body); err != nil {
-			return nil, nil, fmt.Errorf("response: %w", err)
-		}
-	}
-
-	return append([]byte{}, responseUDH...), concat(header, body), nil
 }

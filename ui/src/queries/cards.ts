@@ -22,7 +22,8 @@ export interface KeySet {
 // Card is a SIM card that the platform can reach over the air, by SMS to its MSISDN.
 export interface Card {
   iccid: string;
-  imsi: string;
+  // imsi is informational, absent when unknown: OTA reaches the card by its MSISDN.
+  imsi?: string;
   // msisdn and description may be empty.
   msisdn: string;
   description: string;

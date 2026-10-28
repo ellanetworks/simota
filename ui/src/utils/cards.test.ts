@@ -27,11 +27,11 @@ describe("isICCID", () => {
 });
 
 describe("isIMSI", () => {
-  it.each(["001010", "001010000000001"])("accepts %s", (v) => {
+  it.each(["", "001010", "001010000000001"])("accepts %j", (v) => {
     expect(isIMSI(v)).toBe(true);
   });
 
-  it.each(["", "00101", "0010100000000012", "00101000000000a"])(
+  it.each(["00101", "0010100000000012", "00101000000000a"])(
     "rejects %j",
     (v) => {
       expect(isIMSI(v)).toBe(false);

@@ -53,6 +53,21 @@ func TestParseSkipsIncompleteKeySet(t *testing.T) {
 	}
 }
 
+// TestParseWithoutIMSI reads a file without IMSIs: the IMSI is informational.
+func TestParseWithoutIMSI(t *testing.T) {
+	keys := strings.Repeat("11", 16) + "," + strings.Repeat("22", 16)
+
+	for _, file := range []string{
+		"ICCID,KIC1,KID1\n8988211000000000017," + keys + "\n",
+		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,," + keys + "\n",
+	} {
+		cards, err := Parse(strings.NewReader(file), "3des")
+		if err != nil || len(cards) != 1 || cards[0].IMSI != "" {
+			t.Fatalf("Parse(%q) = %+v, %v", file, cards, err)
+		}
+	}
+}
+
 func TestParseICCIDPadding(t *testing.T) {
 	cards, err := Parse(strings.NewReader("ICCID,IMSI,KIC1,KID1\n894944000000165920F,001010000000001,"+
 		strings.Repeat("11", 16)+","+strings.Repeat("22", 16)+"\n"), "3des")
@@ -76,6 +91,7 @@ func TestParseRejects(t *testing.T) {
 		"ICCID,KIC1\n8988211000000000017,00\n",
 		"ICCID,IMSI,KIC1\n8988211000000000017,001010000000001," + k16 + "\n",
 		"ICCID,IMSI\n12,001010000000001\n",
+		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,00101," + k16 + "," + k16 + "\n",
 		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001,zz,00\n",
 		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001,0011,0011\n",
 		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001," + k16 + "," + strings.Repeat("22", 24) + "\n",

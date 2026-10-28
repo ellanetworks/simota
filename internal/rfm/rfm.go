@@ -7,14 +7,9 @@ import (
 	"fmt"
 )
 
-// Class is the class byte of a script's commands: UICC for an ADF or UICC Shared File System RFM application, such as
-// one linked to the USIM (TS 102 226), and GSM for a SIM File System RFM application (TS 31.116 clause 5.1).
-type Class byte
-
-const (
-	ClassUICC Class = 0x00
-	ClassGSM  Class = 0xa0
-)
+// classUICC is the class byte of a script's commands, for an ADF or UICC Shared File System RFM application, such as
+// one linked to the USIM (TS 102 226 clause 5.1.1, TS 102 221 clause 10.1.1).
+const classUICC = 0x00
 
 const (
 	insSelect       = 0xa4
@@ -46,34 +41,22 @@ type command struct {
 
 // Script is a command string: commands coded as T = 0 TPDU commands, one after the other (TS 102 226 clause 5.1.1).
 type Script struct {
-	class    Class
 	commands []command
 	err      error
 }
 
-func NewScript(class Class) *Script {
-	return &Script{class: class}
+func NewScript() *Script {
+	return &Script{}
 }
 
-// Select selects a file by its identifier, without response data.
+// Select selects a file by its identifier, without response data (TS 102 221 clause 11.1.1, tables 11.1 and 11.2).
 func (s *Script) Select(fid uint16) *Script {
-	if s.class == ClassUICC {
-		// Selection by file identifier, no data returned (TS 102 221 clause 11.1.1, tables 11.1 and 11.2).
-		return s.add(caseNoData, insSelect, 0x00, 0x0c, []byte{byte(fid >> 8), byte(fid)})
-	}
-
-	// A GSM SELECT answers '9F XX' with its response data pending (TS 51.011 clause 9.2.1).
-	return s.add(caseDataPending, insSelect, 0x00, 0x00, []byte{byte(fid >> 8), byte(fid)})
+	return s.add(caseNoData, insSelect, 0x00, 0x0c, []byte{byte(fid >> 8), byte(fid)})
 }
 
 // SelectFCP selects a file by its identifier and asks for its FCP template, which the GET RESPONSE that must follow
-// returns (TS 102 221 clause 11.1.1, table 11.2; TS 102 226 clause 5.1.1). UICC class only.
+// returns (TS 102 221 clause 11.1.1, table 11.2; TS 102 226 clause 5.1.1).
 func (s *Script) SelectFCP(fid uint16) *Script {
-	if s.class != ClassUICC {
-		s.fail(errors.New("an FCP template needs the UICC class"))
-		return s
-	}
-
 	return s.add(caseDataPending, insSelect, 0x00, 0x04, []byte{byte(fid >> 8), byte(fid)})
 }
 
@@ -100,8 +83,7 @@ func (s *Script) ReadBinary(offset uint16, n uint8) *Script {
 	}
 
 	if n == 0 {
-		// P3 '00' is "all data" for an ADF or UICC RFM application (TS 102 226 clause 5.1.1) but 256 octets for a SIM
-		// one (TS 51.011 clause 9.2.3, TS 31.116 clause 5.1): a length is always given.
+		// P3 '00' is "all data" (TS 102 226 clause 5.1.1): a length is always given.
 		s.fail(errors.New("a read needs a length"))
 		return s
 	}
@@ -116,14 +98,14 @@ func (s *Script) GetResponse() *Script {
 }
 
 func (s *Script) add(k kind, ins, p1, p2 byte, data []byte) *Script {
-	apdu := append([]byte{byte(s.class), ins, p1, p2, byte(len(data))}, data...)
+	apdu := append([]byte{classUICC, ins, p1, p2, byte(len(data))}, data...)
 	s.commands = append(s.commands, command{apdu: apdu, kind: k})
 
 	return s
 }
 
 func (s *Script) addLe(ins, p1, p2, le byte) *Script {
-	s.commands = append(s.commands, command{apdu: []byte{byte(s.class), ins, p1, p2, le}, kind: caseData})
+	s.commands = append(s.commands, command{apdu: []byte{classUICC, ins, p1, p2, le}, kind: caseData})
 
 	return s
 }
@@ -191,7 +173,7 @@ func DecodeResponse(b []byte) (Response, error) {
 // Result is a script's outcome.
 type Result struct {
 	// Warning is a status word that completed the last command with a warning, such as '62 82' or '63 CX' (TS 102 221
-	// table 10.9), or '92 0X' (TS 51.011 clause 9.4.3); the command took effect.
+	// table 10.9); the command took effect.
 	Warning bool
 }
 
@@ -223,13 +205,10 @@ func (s *Script) Check(r Response) (Result, error) {
 	case r.StatusWord == 0x9000:
 	case sw1 == 0x91:
 		// Normal ending, with a proactive command pending (TS 102 221 clause 10.2.1.1).
-	case last == caseDataPending && (sw1 == 0x61 || sw1 == 0x9f):
-		// Response data available: '61 XX' (TS 102 221 clause 10.2.1.1), '9F XX' (TS 51.011 clause 9.4.1).
+	case last == caseDataPending && sw1 == 0x61:
+		// Response data available (TS 102 221 clause 10.2.1.1).
 	case sw1 == 0x62 || sw1 == 0x63:
 		// Warnings: processing completed (TS 102 221 clause 10.2.1.2, TS 102 226 clause 4).
-		return Result{Warning: true}, nil
-	case s.class == ClassGSM && sw1 == 0x92 && r.StatusWord&0xf0 == 0:
-		// "Command successful but after using an internal update retry routine" (TS 51.011 clause 9.4.3).
 		return Result{Warning: true}, nil
 	default:
 		return Result{}, fail

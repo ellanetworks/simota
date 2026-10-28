@@ -5,7 +5,9 @@ import { isE164 } from "@/utils/e164";
 export const isICCID = (value: string): boolean =>
   /^\d{18,20}[Ff]?$/.test(value);
 
-export const isIMSI = (value: string): boolean => /^\d{6,15}$/.test(value);
+// isIMSI accepts an IMSI of 6 to 15 digits, or none: it is informational.
+export const isIMSI = (value: string): boolean =>
+  value === "" || /^\d{6,15}$/.test(value);
 
 // isMSISDN accepts an E.164 number, or none.
 export const isMSISDN = (value: string): boolean =>

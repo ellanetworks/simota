@@ -28,10 +28,13 @@ type DB struct {
 	now  func() time.Time
 }
 
+// migrations are the schema's versions; the first is the schema. A job's por_missing marks it closed without the PoR to
+// its last command, by a receipt or the deadline, which a later PoR of that command's TAR and counter still decides;
+// its attempts count the failed submits of its current command.
 var migrations = []string{
 	`CREATE TABLE cards (
 		iccid TEXT PRIMARY KEY,
-		imsi TEXT NOT NULL,
+		imsi TEXT,
 		msisdn TEXT NOT NULL,
 		description TEXT NOT NULL,
 		tar BLOB NOT NULL CHECK (length(tar) = 3),
@@ -72,6 +75,8 @@ var migrations = []string{
 		warning INTEGER NOT NULL CHECK (warning IN (0, 1)),
 		data BLOB,
 		error TEXT NOT NULL,
+		por_missing INTEGER NOT NULL CHECK (por_missing IN (0, 1)),
+		attempts INTEGER NOT NULL CHECK (attempts >= 0),
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		CHECK (operation = 'oplmn_read' OR slot IS NOT NULL),
@@ -91,15 +96,6 @@ var migrations = []string{
 		originator TEXT NOT NULL,
 		validity INTEGER NOT NULL CHECK (validity > 0)
 	);`,
-	// expires_at is the end of the validity that the current command was sent with. por_missing marks a job closed
-	// without the PoR to its last command, by a receipt or the deadline, which a late PoR may still complete. The
-	// validity is capped at 99 days, the longest relative validity_period (SMPP 3.4 section 7.1.1.2).
-	`ALTER TABLE jobs ADD COLUMN expires_at INTEGER;
-	ALTER TABLE jobs ADD COLUMN por_missing INTEGER NOT NULL DEFAULT 0 CHECK (por_missing IN (0, 1));
-	UPDATE smsc SET validity = min(validity, 8553600000000000);
-	UPDATE jobs SET expires_at = updated_at + coalesce((SELECT validity FROM smsc WHERE id = 1) / 1000000, 86400000)
-		WHERE status = 'sent';
-	CREATE INDEX jobs_tar ON jobs (tar, id) WHERE status = 'sent' OR por_missing = 1;`,
 }
 
 // Open opens the database at path, creating it readable and writable by its owner only: it holds the cards' keys.

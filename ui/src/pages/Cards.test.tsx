@@ -4,9 +4,11 @@ import Cards from "@/pages/Cards";
 import type { Card } from "@/queries/cards";
 import { json, renderWithClient, stubApi } from "@/test/render";
 
+const IMSI = "001010000000001";
+
 const card: Card = {
   iccid: "8949440000001659208",
-  imsi: "001010000000001",
+  imsi: IMSI,
   msisdn: "+15550000001",
   description: "Lab phone",
   tar: "b00001",
@@ -178,7 +180,7 @@ const KEY_16 = "00".repeat(16);
 // fillValid fills the add dialog with a valid 3DES card.
 const fillValid = (dialog: HTMLElement) => {
   type(dialog, /^ICCID/, card.iccid);
-  type(dialog, /^IMSI/, card.imsi);
+  type(dialog, /^IMSI/, IMSI);
   type(dialog, /^KIc/, KEY_16);
   type(dialog, /^KID/, "11".repeat(16));
 };
@@ -259,7 +261,7 @@ describe("Add", () => {
       path: "/api/v1/cards",
       body: {
         iccid: card.iccid,
-        imsi: card.imsi,
+        imsi: IMSI,
         msisdn: "",
         description: "",
         tar: "b00001",
@@ -309,7 +311,7 @@ describe("Add", () => {
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].body).toEqual({
       iccid: `${card.iccid}F`,
-      imsi: card.imsi,
+      imsi: IMSI,
       msisdn: "",
       description: "",
       tar: "b00020",
@@ -334,7 +336,6 @@ describe("Add", () => {
     ["empty ICCID", { ICCID: "" }],
     ["IMSI of 5 digits", { IMSI: "00101" }],
     ["IMSI of 16 digits", { IMSI: "0010100000000012" }],
-    ["empty IMSI", { IMSI: "" }],
     ["MSISDN without +", { MSISDN: "15550000001" }],
     ["MSISDN of 16 digits", { MSISDN: "+1234567890123456" }],
     ["TAR of 5 characters", { TAR: "b0001" }],
@@ -371,6 +372,7 @@ describe("Add", () => {
   );
 
   it.each([
+    ["no IMSI", { IMSI: "" }],
     ["an E.164 MSISDN", { MSISDN: "+15550000001" }],
     ["an upper-case TAR", { TAR: "B00001" }],
     ["the TAR b00020", { TAR: "b00020" }],
@@ -449,7 +451,7 @@ describe("Edit", () => {
 
     expect(textbox(dialog, /^ICCID/).value).toBe(card.iccid);
     expect(textbox(dialog, /^ICCID/)).toBeDisabled();
-    expect(textbox(dialog, /^IMSI/).value).toBe(card.imsi);
+    expect(textbox(dialog, /^IMSI/).value).toBe(IMSI);
     expect(textbox(dialog, /^MSISDN/).value).toBe(card.msisdn);
     expect(textbox(dialog, /^Description/).value).toBe(card.description);
     expect(textbox(dialog, /^TAR/).value).toBe(card.tar);
@@ -488,7 +490,7 @@ describe("Edit", () => {
       method: "PUT",
       path: cardPath,
       body: {
-        imsi: card.imsi,
+        imsi: IMSI,
         msisdn: "",
         description: "Spare",
         tar: card.tar,
@@ -656,7 +658,7 @@ describe("Import", () => {
     const dialog = await openImport();
 
     expect(dialog).toHaveTextContent(
-      "Imports ICCID, IMSI and the KIC/KID key sets; ignores Ki, OPc, PINs, ADM keys and KIKs.",
+      "Imports ICCID, the KIC/KID key sets and IMSI, if present; ignores Ki, OPc, PINs, ADM keys and KIKs.",
     );
   });
 
