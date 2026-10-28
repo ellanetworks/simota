@@ -1,0 +1,4 @@
+/simota
+*.db
+*.db-wal
+*.db-shm
