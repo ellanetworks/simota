@@ -19,7 +19,8 @@ const (
 	AES Algorithm = 0x2
 )
 
-// ccLength is the length of a cryptographic checksum. Both algorithms give 8 octets in TS 102 225 clause 5.1.3.1.
+// ccLength is the length of a cryptographic checksum by default: the triple DES one, and the longer AES one, which
+// may be 4 or 8 octets (TS 102 225 clause 5.1.3.1).
 const ccLength = 8
 
 var ErrIntegrity = errors.New("cryptographic checksum mismatch")
@@ -31,6 +32,18 @@ type Keyset struct {
 	Algorithm Algorithm
 	KIc       []byte
 	KID       []byte
+	// CCLength is the length of the cryptographic checksums of an AES key set, 4 or 8, as the card's key was
+	// configured with; 0 is 8. A triple DES checksum is 8 octets.
+	CCLength int
+}
+
+// ccLen is the length of the key set's cryptographic checksums.
+func (k Keyset) ccLen() int {
+	if k.Algorithm == AES && k.CCLength != 0 {
+		return k.CCLength
+	}
+
+	return ccLength
 }
 
 func (k Keyset) validate() error {
@@ -43,9 +56,17 @@ func (k Keyset) validate() error {
 		if len(k.KIc) != 16 || len(k.KID) != 16 {
 			return errors.New("triple DES keys must be 16 octets")
 		}
+
+		if k.CCLength != 0 && k.CCLength != ccLength {
+			return errors.New("a triple DES checksum is 8 octets")
+		}
 	case AES:
 		if !validAESKey(k.KIc) || !validAESKey(k.KID) {
 			return errors.New("AES keys must be 16, 24 or 32 octets")
+		}
+
+		if k.CCLength != 0 && k.CCLength != 4 && k.CCLength != ccLength {
+			return errors.New("an AES checksum is 4 or 8 octets")
 		}
 	default:
 		return fmt.Errorf("unsupported algorithm %#x", byte(k.Algorithm))
@@ -106,7 +127,7 @@ func (k Keyset) decrypt(data []byte) ([]byte, error) {
 }
 
 // checksum is the cryptographic checksum of data: the last block of a CBC-MAC over data padded with zeros for triple
-// DES, or AES-CMAC (RFC 4493) truncated to its first 8 octets.
+// DES, or AES-CMAC (RFC 4493) truncated to its first CCLength octets.
 func (k Keyset) checksum(data []byte) ([]byte, error) {
 	b, err := k.block(k.KID)
 	if err != nil {
@@ -114,7 +135,7 @@ func (k Keyset) checksum(data []byte) ([]byte, error) {
 	}
 
 	if k.Algorithm == AES {
-		return cmac(b, data)[:ccLength], nil
+		return cmac(b, data)[:k.ccLen()], nil
 	}
 
 	padded := pad(data, b.BlockSize())

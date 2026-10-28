@@ -45,8 +45,51 @@ var migrations = []string{
 		algorithm TEXT NOT NULL CHECK (algorithm IN ('3des', 'aes')),
 		kic BLOB NOT NULL,
 		kid BLOB NOT NULL,
-		kik BLOB,
-		PRIMARY KEY (iccid, version)
+		cc_length INTEGER NOT NULL CHECK (cc_length IN (4, 8)),
+		counter INTEGER NOT NULL CHECK (counter BETWEEN 0 AND 1099511627775),
+		PRIMARY KEY (iccid, version),
+		CHECK (algorithm = 'aes' OR cc_length = 8)
+	);
+	CREATE TABLE jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		iccid TEXT NOT NULL REFERENCES cards (iccid) ON DELETE CASCADE,
+		operation TEXT NOT NULL CHECK (operation IN ('oplmn_read', 'oplmn_set', 'oplmn_clear')),
+		slot INTEGER CHECK (slot BETWEEN 1 AND 51),
+		mcc TEXT,
+		mnc TEXT,
+		access INTEGER CHECK (access BETWEEN 0 AND 65535),
+		tar BLOB NOT NULL CHECK (length(tar) = 3),
+		kvn INTEGER NOT NULL CHECK (kvn BETWEEN 1 AND 15),
+		status TEXT NOT NULL CHECK (status IN ('queued', 'sent', 'succeeded', 'unconfirmed', 'failed')),
+		step INTEGER NOT NULL CHECK (step >= 0),
+		file_size INTEGER CHECK (file_size BETWEEN 0 AND 255),
+		counter INTEGER,
+		message_id TEXT,
+		command BLOB,
+		response BLOB,
+		por_status INTEGER,
+		status_word INTEGER,
+		warning INTEGER NOT NULL CHECK (warning IN (0, 1)),
+		data BLOB,
+		error TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		CHECK (operation = 'oplmn_read' OR slot IS NOT NULL),
+		CHECK (operation != 'oplmn_set' OR mcc IS NOT NULL AND mnc IS NOT NULL AND access IS NOT NULL),
+		CHECK (status != 'sent' OR command IS NOT NULL AND counter IS NOT NULL AND message_id IS NOT NULL)
+	);
+	CREATE INDEX jobs_iccid ON jobs (iccid, id);
+	CREATE INDEX jobs_status ON jobs (status, id);
+	CREATE INDEX jobs_message_id ON jobs (message_id) WHERE status = 'sent';
+	CREATE TABLE smsc (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		host TEXT NOT NULL CHECK (host != ''),
+		port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+		tls INTEGER NOT NULL CHECK (tls IN (0, 1)),
+		system_id TEXT NOT NULL CHECK (length(system_id) BETWEEN 1 AND 15),
+		password TEXT NOT NULL CHECK (length(password) BETWEEN 1 AND 8),
+		originator TEXT NOT NULL,
+		validity INTEGER NOT NULL CHECK (validity > 0)
 	);`,
 }
 

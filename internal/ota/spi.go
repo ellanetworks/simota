@@ -2,7 +2,10 @@
 // sends in an SMS-DELIVER, and the Response Packet (PoR) that the card answers with (ETSI TS 102 225, 3GPP TS 31.115).
 package ota
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Integrity is the redundancy check, cryptographic checksum or digital signature of a packet (TS 102 225 clause
 // 5.1.1).
@@ -70,4 +73,19 @@ func (s SPI) encode() ([2]byte, error) {
 	}
 
 	return [2]byte{first, second}, nil
+}
+
+// validatePoR checks the security of the PoR against that of the command: when the PoR has a redundancy check,
+// cryptographic checksum or digital signature, it is the command's kind; and a ciphered PoR needs a command with a
+// cryptographic checksum or digital signature, and ciphered (TS 102 225 clause 5.1.1).
+func (s SPI) validatePoR() error {
+	if s.PoRIntegrity != IntegrityNone && s.PoRIntegrity != s.Integrity {
+		return errors.New("spi: the PoR's integrity must be that of the command")
+	}
+
+	if s.PoRCiphering && (!s.Ciphering || (s.Integrity != IntegrityCC && s.Integrity != IntegrityDS)) {
+		return errors.New("spi: a ciphered PoR needs a ciphered command with a cryptographic checksum or signature")
+	}
+
+	return nil
 }

@@ -7,13 +7,14 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 
 	"github.com/ellanetworks/simota/internal/cardfile"
 	"github.com/ellanetworks/simota/internal/db"
 )
 
-// defaultTAR is the TAR of the SIM RFM application of sysmoISIM cards.
-var defaultTAR = []byte{0xb0, 0x00, 0x10}
+// defaultTAR is the first TAR of the ADF RFM applications in the compact format (TS 101 220 table D.1).
+var defaultTAR = []byte{0xb0, 0x00, 0x01}
 
 var (
 	iccidRE  = regexp.MustCompile(`^[0-9]{18,20}$`)
@@ -34,9 +35,13 @@ type Card struct {
 	UpdatedAt   string         `json:"updated_at"`
 }
 
+// KeySetStatus is a key set without its keys.
 type KeySetStatus struct {
 	Version   int    `json:"version"`
 	Algorithm string `json:"algorithm"`
+	CCLength  int    `json:"cc_length"`
+	// Counter is the last CNTR sent with the key set.
+	Counter uint64 `json:"counter"`
 }
 
 type ListCardsResponse struct {
@@ -61,7 +66,8 @@ type KeySetParams struct {
 	Algorithm string `json:"algorithm"`
 	KIc       string `json:"kic"`
 	KID       string `json:"kid"`
-	KIK       string `json:"kik"`
+	// CCLength is that of an AES key set's checksums, 4 or 8; 0 is 8.
+	CCLength int `json:"cc_length"`
 }
 
 type UpdateCardParams struct {
@@ -101,7 +107,7 @@ func ListCards(cfg Config) http.Handler {
 
 func GetCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := cfg.Store.GetCard(r.Context(), r.PathValue("iccid"))
+		c, err := cfg.Store.GetCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
@@ -157,7 +163,7 @@ func UpdateCard(cfg Config) http.Handler {
 			return
 		}
 
-		c, err := cfg.Store.GetCard(r.Context(), r.PathValue("iccid"))
+		c, err := cfg.Store.GetCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
@@ -197,7 +203,7 @@ func UpdateCard(cfg Config) http.Handler {
 
 func DeleteCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := cfg.Store.DeleteCard(r.Context(), r.PathValue("iccid"))
+		err := cfg.Store.DeleteCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
@@ -212,10 +218,25 @@ func DeleteCard(cfg Config) http.Handler {
 	})
 }
 
-// ImportCards stores the cards of a vendor's key file, sent as the request body.
+// ImportCards stores the cards of a vendor's key file, sent as the request body. The algorithm query parameter, 3des
+// or aes, tells the key sets' algorithm, and cc_length, 4 or 8, the length of an AES key set's checksums.
 func ImportCards(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parsed, err := cardfile.Parse(http.MaxBytesReader(w, r.Body, maxImportBody))
+		q := r.URL.Query()
+
+		algorithm := q.Get("algorithm")
+		if algorithm != "3des" && algorithm != "aes" {
+			writeError(w, http.StatusBadRequest, "algorithm must be 3des or aes", nil, cfg.Logger)
+			return
+		}
+
+		ccLength, ok := atoiDefault(q.Get("cc_length"), 8)
+		if !ok || (ccLength != 8 && (algorithm != "aes" || ccLength != 4)) {
+			writeError(w, http.StatusBadRequest, "cc_length must be 8, or 4 for aes", nil, cfg.Logger)
+			return
+		}
+
+		parsed, err := cardfile.Parse(http.MaxBytesReader(w, r.Body, maxImportBody), algorithm)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
@@ -226,7 +247,7 @@ func ImportCards(cfg Config) http.Handler {
 		for _, p := range parsed {
 			c := db.Card{ICCID: p.ICCID, IMSI: p.IMSI, TAR: defaultTAR, KVN: p.KeySets[0].Version}
 			for _, k := range p.KeySets {
-				c.KeySets = append(c.KeySets, db.KeySet{Version: k.Version, Algorithm: k.Algorithm, KIc: k.KIc, KID: k.KID, KIK: k.KIK})
+				c.KeySets = append(c.KeySets, db.KeySet{Version: k.Version, Algorithm: algorithm, KIc: k.KIc, KID: k.KID, CCLength: ccLength})
 			}
 
 			cards = append(cards, c)
@@ -243,7 +264,7 @@ func ImportCards(cfg Config) http.Handler {
 }
 
 func (p CreateCardParams) card() (db.Card, error) {
-	c := db.Card{ICCID: p.ICCID, IMSI: p.IMSI, MSISDN: p.MSISDN, Description: p.Description, KVN: p.KVN}
+	c := db.Card{ICCID: cardfile.NormalICCID(p.ICCID), IMSI: p.IMSI, MSISDN: p.MSISDN, Description: p.Description, KVN: p.KVN}
 
 	var err error
 	if c.TAR, err = parseTAR(p.TAR); err != nil {
@@ -275,9 +296,17 @@ func (p CreateCardParams) card() (db.Card, error) {
 }
 
 func (p KeySetParams) keySet() (db.KeySet, error) {
-	k := db.KeySet{Version: p.Version, Algorithm: p.Algorithm}
+	k := db.KeySet{Version: p.Version, Algorithm: p.Algorithm, CCLength: p.CCLength}
 	if k.Version < 1 || k.Version > 15 {
 		return db.KeySet{}, fmt.Errorf("key set version %d not in 1-15", k.Version)
+	}
+
+	if k.CCLength == 0 {
+		k.CCLength = 8
+	}
+
+	if k.CCLength != 8 && (k.Algorithm != "aes" || k.CCLength != 4) {
+		return db.KeySet{}, fmt.Errorf("key set %d: cc_length must be 8, or 4 for aes", k.Version)
 	}
 
 	var lengths []int
@@ -291,11 +320,7 @@ func (p KeySetParams) keySet() (db.KeySet, error) {
 		return db.KeySet{}, fmt.Errorf("unknown algorithm %q", k.Algorithm)
 	}
 
-	key := func(name, s string, optional bool) ([]byte, error) {
-		if s == "" && optional {
-			return nil, nil
-		}
-
+	key := func(name, s string) ([]byte, error) {
 		b, err := hex.DecodeString(s)
 		if err != nil || !slices.Contains(lengths, len(b)) {
 			return nil, fmt.Errorf("key set %d: %s must be %v octets of hexadecimal", k.Version, name, lengths)
@@ -305,15 +330,11 @@ func (p KeySetParams) keySet() (db.KeySet, error) {
 	}
 
 	var err error
-	if k.KIc, err = key("KIc", p.KIc, false); err != nil {
+	if k.KIc, err = key("KIc", p.KIc); err != nil {
 		return db.KeySet{}, err
 	}
 
-	if k.KID, err = key("KID", p.KID, false); err != nil {
-		return db.KeySet{}, err
-	}
-
-	if k.KIK, err = key("KIK", p.KIK, true); err != nil {
+	if k.KID, err = key("KID", p.KID); err != nil {
 		return db.KeySet{}, err
 	}
 
@@ -335,6 +356,10 @@ func validate(c db.Card) error {
 	return nil
 }
 
+// parseTAR is the TAR of the RFM application whose current directory is ADF.USIM at the start of a script (TS 102 226
+// clause 7.3): one of the ADF range, 'B0 00 01' or 'B0 00 20' to 'B0 01 1F' (TS 101 220 table D.1), or of the SIM
+// File System range, 'B0 00 10' to 'B0 00 1F', where some cards put it, such as the sysmoISIM-SJA5 at 'B0 00 11'. A
+// TAR that leads elsewhere fails a job's first SELECT.
 func parseTAR(s string) ([]byte, error) {
 	if s == "" {
 		return defaultTAR, nil
@@ -342,7 +367,11 @@ func parseTAR(s string) ([]byte, error) {
 
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != 3 {
-		return nil, errors.New("TAR must be 3 octets of hexadecimal, such as b00010")
+		return nil, errors.New("TAR must be 3 octets of hexadecimal, such as b00001")
+	}
+
+	if n := int(b[0])<<16 | int(b[1])<<8 | int(b[2]); n != 0xb00001 && (n < 0xb00010 || n > 0xb0011f) {
+		return nil, errors.New("TAR must be that of an RFM application reaching ADF.USIM: b00001, or b00010 to b0011f")
 	}
 
 	return b, nil
@@ -356,8 +385,58 @@ func cardResponse(c db.Card) Card {
 	}
 
 	for _, k := range c.KeySets {
-		out.KeySets = append(out.KeySets, KeySetStatus{Version: k.Version, Algorithm: k.Algorithm})
+		out.KeySets = append(out.KeySets, KeySetStatus{Version: k.Version, Algorithm: k.Algorithm, CCLength: k.CCLength, Counter: k.Counter})
 	}
 
 	return out
 }
+
+type KeySetUpdateParams struct {
+	// Counter is the last counter the card accepted with the key set; the next command uses one more.
+	Counter *uint64 `json:"counter"`
+}
+
+// UpdateKeySet sets the counter of a card's key set, for a card used before by another sending entity.
+func UpdateKeySet(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p KeySetUpdateParams
+		if !decodeBody(w, r, &p, cfg) {
+			return
+		}
+
+		version, err := strconv.Atoi(r.PathValue("version"))
+		if err != nil || version < 1 || version > 15 {
+			writeError(w, http.StatusBadRequest, "Invalid key set version", err, cfg.Logger)
+			return
+		}
+
+		if p.Counter == nil || *p.Counter > maxCounter {
+			writeError(w, http.StatusBadRequest, "counter must be between 0 and 1099511627775", nil, cfg.Logger)
+			return
+		}
+
+		iccid := cardfile.NormalICCID(r.PathValue("iccid"))
+
+		err = cfg.Store.SetCounter(r.Context(), iccid, version, *p.Counter)
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "Key set not found", err, cfg.Logger)
+			return
+		}
+
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to update the key set", err, cfg.Logger)
+			return
+		}
+
+		c, err := cfg.Store.GetCard(r.Context(), iccid)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			return
+		}
+
+		writeResponse(w, cardResponse(c), http.StatusOK, cfg.Logger)
+	})
+}
+
+// maxCounter is the largest CNTR, 5 octets (TS 102 225 clause 5.1).
+const maxCounter = 1<<40 - 1

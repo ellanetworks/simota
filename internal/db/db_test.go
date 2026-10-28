@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ellanetworks/simota/internal/db"
 )
@@ -74,7 +75,7 @@ func TestCardCRUD(t *testing.T) {
 	d, _ := open(t)
 
 	c := card("8988211000000000017", 1, 2)
-	c.KeySets[0].KIK = bytes.Repeat([]byte{0x33}, 16)
+	c.KeySets[1].Algorithm, c.KeySets[1].CCLength = "aes", 4
 
 	if err := d.CreateCard(ctx, c); err != nil {
 		t.Fatal(err)
@@ -90,7 +91,7 @@ func TestCardCRUD(t *testing.T) {
 	}
 
 	if len(got.KeySets) != 2 || !bytes.Equal(got.KeySets[0].KIc, c.KeySets[0].KIc) ||
-		!bytes.Equal(got.KeySets[0].KIK, c.KeySets[0].KIK) || got.KeySets[1].KIK != nil {
+		got.KeySets[0].CCLength != 8 || got.KeySets[1].CCLength != 4 || got.KeySets[0].Counter != 0 {
 		t.Fatalf("key sets = %+v", got.KeySets)
 	}
 
@@ -190,5 +191,210 @@ func TestImportCardsIsAtomic(t *testing.T) {
 
 	if cards, _, _ := d.ListCards(ctx, 1, 25); len(cards) != 0 {
 		t.Fatalf("a failed import left %d cards", len(cards))
+	}
+}
+
+func TestNextCounter(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	if err := d.CreateCard(ctx, card("8988211000000000017", 1, 2)); err != nil {
+		t.Fatal(err)
+	}
+
+	for want := uint64(1); want <= 3; want++ {
+		got, err := d.NextCounter(ctx, "8988211000000000017", 1)
+		if err != nil || got != want {
+			t.Fatalf("counter = %d, %v, want %d", got, err, want)
+		}
+	}
+
+	// Each key set has its own counter (TS 102 225 annex A).
+	if got, _ := d.NextCounter(ctx, "8988211000000000017", 2); got != 1 {
+		t.Fatalf("key set 2 counter = %d", got)
+	}
+
+	if _, err := d.NextCounter(ctx, "8988211000000000025", 1); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("missing card = %v", err)
+	}
+
+	if _, err := d.NextCounter(ctx, "8988211000000000017", 9); !errors.Is(err, db.ErrCounterExhausted) {
+		t.Fatalf("missing key set = %v", err)
+	}
+
+	// A re-import with the same key set versions keeps their counters: they are the card's.
+	if _, _, err := d.ImportCards(ctx, []db.Card{card("8988211000000000017", 1, 2)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := d.NextCounter(ctx, "8988211000000000017", 1); got != 4 {
+		t.Fatalf("counter after re-import = %d, want 4", got)
+	}
+}
+
+func TestCounterExhausted(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	c := card("8988211000000000017", 1)
+	c.KeySets[0].Counter = 1<<40 - 1
+
+	if err := d.CreateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := d.NextCounter(ctx, c.ICCID, 1); !errors.Is(err, db.ErrCounterExhausted) {
+		t.Fatalf("err = %v, want ErrCounterExhausted", err)
+	}
+}
+
+// TestImportKeepsUsableKVN checks that a re-import without the card's selected key set moves it to the file's first.
+func TestImportKeepsUsableKVN(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	c := card("8988211000000000017", 3, 1)
+	if err := d.CreateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := d.ImportCards(ctx, []db.Card{card(c.ICCID, 1, 2)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := d.GetCard(ctx, c.ICCID); got.KVN != 1 || len(got.KeySets) != 2 {
+		t.Fatalf("card = %+v", got)
+	}
+}
+
+// TestJobSteps checks a job's life: created with its card's TAR and KVN, sent, advanced to its next command, finished.
+func TestJobSteps(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	c := card("8988211000000000017", 2)
+	c.MSISDN = "+15550000017"
+
+	if err := d.CreateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := d.CreateJobs(ctx, []db.Job{{ICCID: c.ICCID, Operation: db.OperationOPLMNRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	j, _ := d.GetJob(ctx, ids[0])
+	if !bytes.Equal(j.TAR, c.TAR) || j.KVN != 2 || j.Status != db.JobQueued || j.Step != 0 || j.FileSize != -1 || j.PoRStatus != -1 {
+		t.Fatalf("created = %+v", j)
+	}
+
+	// A change of the card's key set does not change the job's.
+	c.KVN = 2
+
+	c.TAR = []byte{0xb0, 0x00, 0x20}
+	if err := d.UpdateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := d.SentJob(ctx, "55"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("sent job before it is sent = %v", err)
+	}
+
+	if err := d.MarkJobSent(ctx, j.ID, 7, "55", []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+
+	j, _ = d.GetJob(ctx, j.ID)
+	if j.Status != db.JobSent || j.Counter != 7 || j.MessageID != "55" || !bytes.Equal(j.TAR, []byte{0xb0, 0x00, 0x10}) {
+		t.Fatalf("sent = %+v", j)
+	}
+
+	// The SMSC's deliver_sm finds the job by its message_id, or by the card's MSISDN.
+	if got, err := d.SentJob(ctx, "55"); err != nil || got.ID != j.ID {
+		t.Fatalf("SentJob = %+v, %v", got, err)
+	}
+
+	if got, err := d.SentJobTo(ctx, c.MSISDN); err != nil || got.ID != j.ID {
+		t.Fatalf("SentJobTo(%s) = %+v, %v", c.MSISDN, got, err)
+	}
+
+	if _, err := d.SentJobTo(ctx, "+15559999999"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("SentJobTo another number = %v", err)
+	}
+
+	j.Step, j.FileSize, j.PoRStatus, j.StatusWord, j.Response = 1, 60, 0, 0x9000, []byte{2}
+	if err := d.AdvanceJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.AdvanceJob(ctx, j); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("advance a queued job = %v", err)
+	}
+
+	j, _ = d.GetJob(ctx, j.ID)
+	if j.Status != db.JobQueued || j.Step != 1 || j.FileSize != 60 || j.StatusWord != 0x9000 {
+		t.Fatalf("advanced = %+v", j)
+	}
+
+	j.Status, j.Error = db.JobUnconfirmed, "no PoR"
+	if err := d.FinishJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	j, _ = d.GetJob(ctx, j.ID)
+	if j.Status != db.JobUnconfirmed || j.Error != "no PoR" {
+		t.Fatalf("finished = %+v", j)
+	}
+
+	if _, err := d.CreateJobs(ctx, []db.Job{{ICCID: "8988211000000000025", Operation: db.OperationOPLMNRead}}); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("job for a missing card = %v", err)
+	}
+}
+
+func TestSMSC(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	if _, err := d.GetSMSC(ctx); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("unset SMSC = %v, want ErrNotFound", err)
+	}
+
+	want := db.SMSC{
+		Host: "127.0.0.1", Port: 2775, SystemID: "simota", Originator: "+15550001000", Validity: time.Hour,
+	}
+	if err := d.PutSMSC(ctx, want); err == nil {
+		t.Fatal("expected a first SMSC without a password to be refused")
+	}
+
+	want.Password = "secret"
+	if err := d.PutSMSC(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+
+	// An update without a password keeps it.
+	want.Host, want.Port, want.TLS, want.Validity = "smsc.example", 3550, true, 24*time.Hour
+
+	update := want
+	update.Password = ""
+
+	if err := d.PutSMSC(ctx, update); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := d.GetSMSC(ctx); err != nil || got != want {
+		t.Fatalf("SMSC = %+v, %v, want %+v", got, err, want)
+	}
+
+	// The schema refuses what SMPP cannot carry: a system_id of 16 characters, a password of 9 (SMPP 3.4 section
+	// 4.1.1, table 4-1).
+	for _, bad := range []db.SMSC{
+		{Host: "h", Port: 2775, SystemID: "0123456789abcdef", Password: "pw", Validity: time.Hour},
+		{Host: "h", Port: 2775, SystemID: "simota", Password: "123456789", Validity: time.Hour},
+		{Host: "h", Port: 0, SystemID: "simota", Password: "pw", Validity: time.Hour},
+	} {
+		if err := d.PutSMSC(ctx, bad); err == nil {
+			t.Errorf("PutSMSC(%+v) accepted", bad)
+		}
 	}
 }

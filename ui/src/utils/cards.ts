@@ -1,15 +1,20 @@
 import type { KeyAlgorithm } from "@/queries/cards";
+import { isE164 } from "@/utils/e164";
 
-export const isICCID = (value: string): boolean => /^\d{18,20}$/.test(value);
+// isICCID accepts a trailing F, the padding of an odd number of digits, which the server drops.
+export const isICCID = (value: string): boolean =>
+  /^\d{18,20}[Ff]?$/.test(value);
 
 export const isIMSI = (value: string): boolean => /^\d{6,15}$/.test(value);
 
 // isMSISDN accepts an E.164 number, or none.
 export const isMSISDN = (value: string): boolean =>
-  value === "" || /^\+[1-9]\d{0,14}$/.test(value);
+  value === "" || isE164(value);
 
-// isTAR is a Toolkit Application Reference: 3 bytes, in hex.
-export const isTAR = (value: string): boolean => /^[0-9A-Fa-f]{6}$/.test(value);
+// isTAR is the TAR of an RFM application that reaches ADF.USIM: b00001 or b00020 to b0011f, the ADF range of ETSI TS
+// 101 220 table D.1, or b00010 to b0001f, where some cards put it, such as the sysmoISIM-SJA5 at b00011.
+export const isTAR = (value: string): boolean =>
+  /^[bB]0(00(01|[1-9a-fA-F][0-9a-fA-F])|01[01][0-9a-fA-F])$/.test(value);
 
 // KEY_BYTES are the key lengths of each algorithm: 3DES takes a double-length key, AES any of its three.
 export const KEY_BYTES: Record<KeyAlgorithm, number[]> = {

@@ -10,37 +10,41 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-// Card is a card of a key file: only what OTA needs. Ki, OPc, PINs and ADM keys are left out.
+// Card is a card of a key file: only what OTA needs. Ki, OPc, PINs, ADM keys and KIKs are left out.
 type Card struct {
 	ICCID   string
 	IMSI    string
 	KeySets []KeySet
 }
 
-// KeySet is the keys of a key set number. A key file does not tell the algorithm: 16-octet keys are taken as triple
-// DES, the sysmoISIM's, and longer ones as AES.
+// KeySet is the ciphering and integrity keys of a key set number.
 type KeySet struct {
-	Version   int
-	Algorithm string
-	KIc, KID  []byte
-	KIK       []byte
+	Version  int
+	KIc, KID []byte
 }
 
 var (
-	keyColumn = regexp.MustCompile(`^(KIC|KID|KIK)([1-9]|1[0-5])$`)
+	keyColumn = regexp.MustCompile(`^(KIC|KID)([1-9]|1[0-5])$`)
 	iccidRE   = regexp.MustCompile(`^[0-9]{18,20}$`)
 	imsiRE    = regexp.MustCompile(`^[0-9]{6,15}$`)
 )
 
 var ErrFormat = errors.New("invalid key file")
 
-// Parse reads the cards of a key file. A card needs an ICCID, an IMSI, and a key set with KIc and KID; a key set that
-// lacks either is left out.
-func Parse(r io.Reader) ([]Card, error) {
+// Parse reads the cards of a key file whose key sets use algorithm, "3des" or "aes": a key file does not tell it, and
+// key lengths do not either (TS 102 225 clauses 5.1.2, 5.1.3). A card needs an ICCID, an IMSI, and a key set with KIc
+// and KID of the algorithm's length; a key set that lacks either is left out.
+func Parse(r io.Reader, algorithm string) ([]Card, error) {
+	lengths, ok := map[string][]int{"3des": {16}, "aes": {16, 24, 32}}[algorithm]
+	if !ok {
+		return nil, fmt.Errorf("unknown algorithm %q", algorithm)
+	}
+
 	b, err := io.ReadAll(io.LimitReader(r, 16<<20))
 	if err != nil {
 		return nil, err
@@ -96,7 +100,7 @@ func Parse(r io.Reader) ([]Card, error) {
 			return ""
 		}
 
-		c := Card{ICCID: field(iccidCol), IMSI: field(imsiCol)}
+		c := Card{ICCID: NormalICCID(field(iccidCol)), IMSI: field(imsiCol)}
 		if !iccidRE.MatchString(c.ICCID) {
 			return nil, fmt.Errorf("%w: line %d: invalid ICCID %q", ErrFormat, line, c.ICCID)
 		}
@@ -123,13 +127,10 @@ func Parse(r io.Reader) ([]Card, error) {
 				sets[v] = &KeySet{Version: v}
 			}
 
-			switch m[1] {
-			case "KIC":
+			if m[1] == "KIC" {
 				sets[v].KIc = key
-			case "KID":
+			} else {
 				sets[v].KID = key
-			case "KIK":
-				sets[v].KIK = key
 			}
 		}
 
@@ -143,12 +144,11 @@ func Parse(r io.Reader) ([]Card, error) {
 				continue
 			}
 
-			alg, err := algorithm(s.KIc, s.KID, s.KIK)
-			if err != nil {
-				return nil, fmt.Errorf("%w: line %d: key set %d: %v", ErrFormat, line, v, err)
+			if len(s.KIc) != len(s.KID) || !slices.Contains(lengths, len(s.KIc)) {
+				return nil, fmt.Errorf("%w: line %d: key set %d: keys of %d and %d octets for %s", ErrFormat, line, v,
+					len(s.KIc), len(s.KID), algorithm)
 			}
 
-			s.Algorithm = alg
 			c.KeySets = append(c.KeySets, *s)
 		}
 
@@ -162,21 +162,12 @@ func Parse(r io.Reader) ([]Card, error) {
 	return cards, nil
 }
 
-func algorithm(keys ...[]byte) (string, error) {
-	n := len(keys[0])
-
-	for _, k := range keys {
-		if k != nil && len(k) != n {
-			return "", errors.New("keys of different lengths")
-		}
+// NormalICCID is an ICCID without the 'F' that pads an odd number of digits, as some files print it (TS 102 221
+// clause 13.2).
+func NormalICCID(s string) string {
+	if strings.HasSuffix(s, "F") || strings.HasSuffix(s, "f") {
+		return s[:len(s)-1]
 	}
 
-	switch n {
-	case 16:
-		return "3des", nil
-	case 24, 32:
-		return "aes", nil
-	default:
-		return "", fmt.Errorf("keys of %d octets", n)
-	}
+	return s
 }

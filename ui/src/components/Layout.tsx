@@ -26,7 +26,9 @@ import {
   LightMode as LightModeIcon,
   Menu as MenuIcon,
   OpenInNew as OpenInNewIcon,
+  PlaylistPlay as JobsIcon,
   SimCard as SimCardIcon,
+  Sms as SmsIcon,
 } from "@mui/icons-material";
 import { Link, useLocation } from "react-router-dom";
 import DeploymentIdentity from "@/components/DeploymentIdentity";
@@ -78,6 +80,16 @@ const navItems: NavItem[] = [
     to: "/cards",
     label: "Cards",
     icon: <SimCardIcon color="primary" />,
+  },
+  {
+    to: "/jobs",
+    label: "Jobs",
+    icon: <JobsIcon color="primary" />,
+  },
+  {
+    to: "/smsc",
+    label: "SMSC",
+    icon: <SmsIcon color="primary" />,
   },
 ];
 

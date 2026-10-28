@@ -12,7 +12,9 @@ import EditDialog from "@/components/EditDialog";
 import { useSnackbar } from "@/contexts/SnackbarContext";
 import {
   type Card,
+  type CCLength,
   type KeyAlgorithm,
+  type KeySet,
   createCard,
   updateCard,
 } from "@/queries/cards";
@@ -25,10 +27,39 @@ import {
   keyHelp,
 } from "@/utils/cards";
 
-export const DEFAULT_TAR = "b00010";
+// DEFAULT_TAR is the first ADF RFM application linked to the USIM.
+export const DEFAULT_TAR = "b00001";
 
 export const algorithmLabel = (algorithm: KeyAlgorithm): string =>
   algorithm === "3des" ? "3DES" : "AES";
+
+// keySetLabel is a key set, such as "1 (3DES, counter 3)", with the length of its checksums when AES may shorten it.
+export const keySetLabel = (k: KeySet): string =>
+  `${k.version} (${algorithmLabel(k.algorithm)}` +
+  (k.algorithm === "aes" ? `, CC ${k.cc_length}` : "") +
+  `, counter ${k.counter})`;
+
+// CCLengthField chooses the length of an AES key set's cryptographic checksums.
+export function CCLengthField({
+  value,
+  onChange,
+}: {
+  value: CCLength;
+  onChange: (value: CCLength) => void;
+}) {
+  return (
+    <TextField
+      select
+      label="CC Length"
+      value={value}
+      onChange={(e) => onChange(Number(e.target.value) as CCLength)}
+      helperText="The length of the cryptographic checksums, in bytes."
+    >
+      <MenuItem value={8}>8</MenuItem>
+      <MenuItem value={4}>4</MenuItem>
+    </TextField>
+  );
+}
 
 // errorFor is the error of a field, shown once something is typed: an empty required field only keeps the form
 // from submitting.
@@ -63,7 +94,7 @@ const profileErrors = (p: Profile) => ({
     isMSISDN(p.msisdn),
     "An E.164 number, such as +15550000001.",
   ),
-  tar: errorFor(p.tar, isTAR(p.tar), "6 hex characters, such as b00010."),
+  tar: errorFor(p.tar, isTAR(p.tar), "b00001, or b00020 to b0011f."),
 });
 
 const profileValid = (p: Profile) =>
@@ -112,7 +143,7 @@ function ProfileFields({
         error={errors.tar !== undefined}
         helperText={
           errors.tar ??
-          "The Toolkit Application Reference that commands go to, such as b00010 for SIM RFM."
+          "RFM TAR that reaches ADF.USIM (TS 101 220), e.g. b00001; sysmoISIM: b00011"
         }
         required
       />
@@ -134,7 +165,7 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
   const [algorithm, setAlgorithm] = useState<KeyAlgorithm>("3des");
   const [kic, setKic] = useState("");
   const [kid, setKid] = useState("");
-  const [kik, setKik] = useState("");
+  const [ccLength, setCcLength] = useState<CCLength>(8);
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -142,7 +173,16 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
         iccid,
         ...profile,
         kvn: Number(version),
-        key_sets: [{ version: Number(version), algorithm, kic, kid, kik }],
+        key_sets: [
+          {
+            version: Number(version),
+            algorithm,
+            // A 3DES key set's checksums are 8 bytes, the server's default.
+            ...(algorithm === "aes" && { cc_length: ccLength }),
+            kic,
+            kid,
+          },
+        ],
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["cards"] });
@@ -155,7 +195,11 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
   // A key set version is the 4 bits of the KIc and KID that name it.
   const versionValid =
     /^\d+$/.test(version) && versionNumber >= 1 && versionNumber <= 15;
-  const iccidError = errorFor(iccid, isICCID(iccid), "18 to 20 digits.");
+  const iccidError = errorFor(
+    iccid,
+    isICCID(iccid),
+    "18 to 20 digits, and an optional trailing F.",
+  );
   const keyError = (key: string) =>
     errorFor(key, isKey(key, algorithm), keyHelp(algorithm));
 
@@ -164,8 +208,7 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
     profileValid(profile) &&
     versionValid &&
     isKey(kic, algorithm) &&
-    isKey(kid, algorithm) &&
-    (kik === "" || isKey(kik, algorithm));
+    isKey(kid, algorithm);
 
   return (
     <EditDialog
@@ -223,6 +266,9 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
               <MenuItem value="aes">AES</MenuItem>
             </TextField>
           </Stack>
+          {algorithm === "aes" && (
+            <CCLengthField value={ccLength} onChange={setCcLength} />
+          )}
           <HexField
             label="KIc"
             value={kic}
@@ -238,13 +284,6 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
             error={keyError(kid) !== undefined}
             helperText={keyError(kid) ?? "The cryptographic checksum key."}
             required
-          />
-          <HexField
-            label="KIK"
-            value={kik}
-            onChange={(e) => setKik(hex(e.target.value))}
-            error={keyError(kik) !== undefined}
-            helperText={keyError(kik) ?? "The key that ciphers keys. Optional."}
           />
         </Stack>
       </Box>

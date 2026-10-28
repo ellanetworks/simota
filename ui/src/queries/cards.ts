@@ -7,10 +7,16 @@ import {
 
 export type KeyAlgorithm = "3des" | "aes";
 
+// CCLength is the length of a key set's cryptographic checksums, in bytes. 4 is for AES only.
+export type CCLength = 4 | 8;
+
 // KeySet is a card's OTA key set as the server returns it: its keys are write-only.
 export interface KeySet {
   version: number;
   algorithm: KeyAlgorithm;
+  cc_length: CCLength;
+  // counter is the last counter sent with the key set.
+  counter: number;
 }
 
 // Card is a SIM card that the platform can reach over the air, by SMS to its MSISDN.
@@ -29,11 +35,13 @@ export interface Card {
   updated_at: string;
 }
 
-// KeySetParams is a key set with its keys, in hex. kik may be empty.
-export interface KeySetParams extends KeySet {
+// KeySetParams is a key set with its keys, in hex. cc_length defaults to 8.
+export interface KeySetParams {
+  version: number;
+  algorithm: KeyAlgorithm;
+  cc_length?: CCLength;
   kic: string;
   kid: string;
-  kik: string;
 }
 
 export type CardUpdate = Pick<
@@ -72,6 +80,21 @@ export const deleteCard = (iccid: string): Promise<{ message: string }> =>
     method: "DELETE",
   });
 
+// ImportParams are what a key file does not tell: the algorithm of its key sets, and for AES their checksums' length.
+export interface ImportParams {
+  algorithm: KeyAlgorithm;
+  ccLength?: CCLength;
+}
+
 // importCards sends a card vendor's key file, as is.
-export const importCards = (file: string): Promise<ImportResult> =>
-  apiFetch<ImportResult>(`${cardsPath}/import`, { method: "POST", text: file });
+export const importCards = (
+  file: string,
+  params: ImportParams,
+): Promise<ImportResult> =>
+  apiFetch<ImportResult>(
+    withQuery(`${cardsPath}/import`, {
+      algorithm: params.algorithm,
+      cc_length: params.ccLength,
+    }),
+    { method: "POST", text: file },
+  );

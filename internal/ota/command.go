@@ -47,6 +47,10 @@ func (c Command) Encode() (udh, ud []byte, err error) {
 		return nil, nil, errors.New("command: AES needs a counter that must be higher or one higher")
 	}
 
+	if err := c.SPI.validatePoR(); err != nil {
+		return nil, nil, fmt.Errorf("command: %w", err)
+	}
+
 	return c.encode(spi)
 }
 
@@ -62,7 +66,7 @@ func (c Command) encode(spi [2]byte) (udh, ud []byte, err error) {
 
 	ccLen := 0
 	if c.SPI.Integrity == IntegrityCC {
-		ccLen = ccLength
+		ccLen = c.Keyset.ccLen()
 	}
 
 	data := c.Data

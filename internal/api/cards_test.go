@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -18,7 +19,10 @@ import (
 )
 
 type env struct {
-	srv *httptest.Server
+	srv      *httptest.Server
+	store    *db.DB
+	notified *int
+	gateway  *fakeGateway
 }
 
 func newEnv(t *testing.T) env {
@@ -31,10 +35,14 @@ func newEnv(t *testing.T) env {
 
 	t.Cleanup(func() { _ = store.Close() })
 
-	srv := httptest.NewServer(api.NewHandler(api.Config{Store: store, Version: "test", Logger: slog.New(slog.DiscardHandler)}))
+	notified := new(int)
+	gw := &fakeGateway{}
+	srv := httptest.NewServer(api.NewHandler(api.Config{
+		Store: store, Version: "test", Notify: func() { *notified++ }, Gateway: gw, Logger: slog.New(slog.DiscardHandler),
+	}))
 	t.Cleanup(srv.Close)
 
-	return env{srv: srv}
+	return env{srv: srv, store: store, notified: notified, gateway: gw}
 }
 
 func (e env) do(t *testing.T, method, path, contentType, body string) (int, string) {
@@ -66,7 +74,7 @@ var (
 	kid = strings.Repeat("22", 16)
 )
 
-const newCard = `{"iccid":"8988211000000000017","imsi":"001010000000001","msisdn":"+15550000001","tar":"b00010",
+const newCard = `{"iccid":"8988211000000000017","imsi":"001010000000001","msisdn":"+15550000001","tar":"b00001",
 	"key_sets":[{"version":1,"algorithm":"3des","kic":"` + "%KIC%" + `","kid":"` + "%KID%" + `"}]}`
 
 func cardBody() string {
@@ -90,7 +98,7 @@ func TestCardLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if created.Result.KVN != 1 || created.Result.TAR != "b00010" || len(created.Result.KeySets) != 1 ||
+	if created.Result.KVN != 1 || created.Result.TAR != "b00001" || len(created.Result.KeySets) != 1 ||
 		created.Result.KeySets[0].Algorithm != "3des" {
 		t.Fatalf("card = %+v", created.Result)
 	}
@@ -100,13 +108,13 @@ func TestCardLifecycle(t *testing.T) {
 	}
 
 	code, body = e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000017", "application/json",
-		`{"imsi":"001010000000001","msisdn":"+15550000002","description":"A56","tar":"b00010","kvn":1}`)
+		`{"imsi":"001010000000001","msisdn":"+15550000002","description":"A56","tar":"b00001","kvn":1}`)
 	if code != http.StatusOK || !strings.Contains(body, `"msisdn":"+15550000002"`) {
 		t.Fatalf("update = %d %s", code, body)
 	}
 
 	if code, _ := e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000017", "application/json",
-		`{"imsi":"001010000000001","tar":"b00010","kvn":2}`); code != http.StatusBadRequest {
+		`{"imsi":"001010000000001","tar":"b00001","kvn":2}`); code != http.StatusBadRequest {
 		t.Fatalf("update to a missing key set = %d", code)
 	}
 
@@ -131,7 +139,12 @@ func TestCreateCardRejects(t *testing.T) {
 		{`"iccid":"8988211000000000017"`, `"iccid":"12"`},
 		{`"imsi":"001010000000001"`, `"imsi":"x"`},
 		{`"msisdn":"+15550000001"`, `"msisdn":"15550000001"`},
-		{`"tar":"b00010"`, `"tar":"b000"`},
+		{`"tar":"b00001"`, `"tar":"b000"`},
+		{`"tar":"b00001"`, `"tar":"b0000f"`},
+		{`"tar":"b00001"`, `"tar":"b00120"`},
+		{`"tar":"b00001"`, `"tar":"b00000"`},
+		{`"tar":"b00001"`, `"tar":"b10011"`},
+		{`"algorithm":"3des"`, `"algorithm":"3des","cc_length":4`},
 		{`"algorithm":"3des"`, `"algorithm":"des"`},
 		{kic, "0011"},
 	} {
@@ -153,7 +166,7 @@ func TestImportCards(t *testing.T) {
 		"8988211000000000017\t999700000000001\t" + strings.Repeat("ff", 16) + "\t" + kic + "\t" + kid + "\t" + kic + "\t" + kid + "\n" +
 		"8988211000000000025\t999700000000002\t" + strings.Repeat("ff", 16) + "\t" + kic + "\t" + kid + "\t\t\n"
 
-	code, body := e.do(t, http.MethodPost, "/api/v1/cards/import", "text/plain", file)
+	code, body := e.do(t, http.MethodPost, "/api/v1/cards/import?algorithm=3des", "text/plain", file)
 	if code != http.StatusOK || !strings.Contains(body, `"created":1`) || !strings.Contains(body, `"updated":1`) {
 		t.Fatalf("import = %d %s", code, body)
 	}
@@ -170,8 +183,29 @@ func TestImportCards(t *testing.T) {
 		t.Fatalf("card = %+v", c.Result)
 	}
 
-	if code, _ := e.do(t, http.MethodPost, "/api/v1/cards/import", "text/plain", "ICCID\n1\n"); code != http.StatusBadRequest {
-		t.Fatalf("bad import = %d", code)
+	for _, path := range []string{
+		"/api/v1/cards/import?algorithm=3des", "/api/v1/cards/import", "/api/v1/cards/import?algorithm=des",
+		"/api/v1/cards/import?algorithm=3des&cc_length=4", "/api/v1/cards/import?algorithm=aes&cc_length=6",
+	} {
+		body := file
+		if path == "/api/v1/cards/import?algorithm=3des" {
+			body = "ICCID\n1\n"
+		}
+
+		if code, _ := e.do(t, http.MethodPost, path, "text/plain", body); code != http.StatusBadRequest {
+			t.Fatalf("import %s = %d, want 400", path, code)
+		}
+	}
+
+	// AES-128 keys with 4-octet checksums.
+	aes := strings.Replace(file, "8988211000000000025", "8988211000000000033", 1)
+	if code, body := e.do(t, http.MethodPost, "/api/v1/cards/import?algorithm=aes&cc_length=4", "text/plain", aes); code != http.StatusOK {
+		t.Fatalf("AES import = %d %s", code, body)
+	}
+
+	if _, body := e.do(t, http.MethodGet, "/api/v1/cards/8988211000000000033", "", ""); !strings.Contains(body,
+		`"key_sets":[{"version":1,"algorithm":"aes","cc_length":4,"counter":0}]`) {
+		t.Fatalf("AES card = %s", body)
 	}
 }
 
@@ -281,7 +315,7 @@ func TestListCardsPages(t *testing.T) {
 func TestUnknownFieldsRejected(t *testing.T) {
 	e := newEnv(t)
 
-	body := strings.Replace(cardBody(), `"tar":"b00010"`, `"tar":"b00010","adm1":"12345678"`, 1)
+	body := strings.Replace(cardBody(), `"tar":"b00001"`, `"tar":"b00001","adm1":"12345678"`, 1)
 	if code, b := e.do(t, http.MethodPost, "/api/v1/cards", "application/json", body); code != http.StatusBadRequest ||
 		b != `{"error":"Invalid request data"}` {
 		t.Fatalf("create with an unknown field = %d %s", code, b)
@@ -320,11 +354,66 @@ func TestOpenAPISpecCoversRoutes(t *testing.T) {
 	for _, route := range []string{
 		"GET /api/v1/cards", "POST /api/v1/cards", "POST /api/v1/cards/import", "GET /api/v1/cards/{iccid}",
 		"PUT /api/v1/cards/{iccid}", "DELETE /api/v1/cards/{iccid}", "GET /api/v1/status", "GET /api/v1/livez",
-		"GET /api/v1/readyz", "GET /api/v1/openapi.yaml",
+		"GET /api/v1/readyz", "GET /api/v1/openapi.yaml", "POST /api/v1/jobs", "GET /api/v1/jobs", "GET /api/v1/jobs/{id}",
+		"GET /api/v1/smsc", "PUT /api/v1/smsc", "PUT /api/v1/cards/{iccid}/key-sets/{version}",
 	} {
 		method, path, _ := strings.Cut(route, " ")
 		if _, ok := spec.Paths[path][strings.ToLower(method)]; !ok {
 			t.Errorf("spec is missing %s", route)
+		}
+	}
+}
+
+func itoa(n int64) string {
+	return strconv.FormatInt(n, 10)
+}
+
+// TestICCIDPadding checks that an ICCID with the 'F' padding of an odd number of digits names the same card (TS 102 221
+// clause 13.2).
+func TestICCIDPadding(t *testing.T) {
+	e := newEnv(t)
+
+	body := strings.Replace(cardBody(), `"iccid":"8988211000000000017"`, `"iccid":"898821100000000001F"`, 1)
+	if code, b := e.do(t, http.MethodPost, "/api/v1/cards", "application/json", body); code != http.StatusCreated ||
+		!strings.Contains(b, `"iccid":"898821100000000001"`) {
+		t.Fatalf("create = %d %s", code, b)
+	}
+
+	if code, _ := e.do(t, http.MethodGet, "/api/v1/cards/898821100000000001f", "", ""); code != http.StatusOK {
+		t.Fatalf("get padded = %d", code)
+	}
+}
+
+func TestUpdateKeySetCounter(t *testing.T) {
+	e := newEnv(t)
+
+	if code, b := e.do(t, http.MethodPost, "/api/v1/cards", "application/json", cardBody()); code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, b)
+	}
+
+	code, body := e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000017/key-sets/1", "application/json", `{"counter":16}`)
+	if code != http.StatusOK || !strings.Contains(body, `"counter":16`) {
+		t.Fatalf("set counter = %d %s", code, body)
+	}
+
+	// The next command takes one more.
+	if got, err := e.store.NextCounter(context.Background(), "8988211000000000017", 1); err != nil || got != 17 {
+		t.Fatalf("next counter = %d, %v", got, err)
+	}
+
+	for _, tc := range []struct {
+		path, body string
+		code       int
+	}{
+		{"/api/v1/cards/8988211000000000017/key-sets/2", `{"counter":1}`, http.StatusNotFound},
+		{"/api/v1/cards/8988211000000000025/key-sets/1", `{"counter":1}`, http.StatusNotFound},
+		{"/api/v1/cards/8988211000000000017/key-sets/16", `{"counter":1}`, http.StatusBadRequest},
+		{"/api/v1/cards/8988211000000000017/key-sets/1", `{}`, http.StatusBadRequest},
+		{"/api/v1/cards/8988211000000000017/key-sets/1", `{"counter":1099511627776}`, http.StatusBadRequest},
+		{"/api/v1/cards/8988211000000000017/key-sets/1", `{"counter":-1}`, http.StatusBadRequest},
+	} {
+		if code, b := e.do(t, http.MethodPut, tc.path, "application/json", tc.body); code != tc.code {
+			t.Fatalf("PUT %s %s = %d %s, want %d", tc.path, tc.body, code, b, tc.code)
 		}
 	}
 }

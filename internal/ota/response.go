@@ -50,7 +50,12 @@ func (s Status) String() string {
 		return n
 	}
 
-	return fmt.Sprintf("reserved_%#02x", byte(s))
+	// 'C0' to 'FE' are proprietary; the others are reserved (TS 102 225 table 5).
+	if s >= 0xc0 && s <= 0xfe {
+		return fmt.Sprintf("proprietary_%02x", byte(s))
+	}
+
+	return fmt.Sprintf("reserved_%02x", byte(s))
 }
 
 var ErrNotResponse = errors.New("not a response packet")
@@ -97,7 +102,7 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 	// A card that cannot authenticate the Sending Entity may answer with an error status, no security and a zero
 	// counter (TS 102 225 clause 4.1).
 	if rhl == 10 && len(body) == counterLength+2 && Status(body[counterLength+1]) != StatusPoROK &&
-		(spi.PoRCiphering || spi.PoRIntegrity != IntegrityNone) {
+		bytes.Equal(body[:counterLength], make([]byte, counterLength)) && (spi.PoRCiphering || spi.PoRIntegrity != IntegrityNone) {
 		r := Response{Status: Status(body[counterLength+1]), Unsecured: true}
 		copy(r.TAR[:], header[3:6])
 
@@ -106,7 +111,7 @@ func DecodeResponse(k Keyset, spi SPI, udh, ud []byte) (Response, error) {
 
 	ccLen := 0
 	if spi.PoRIntegrity == IntegrityCC {
-		ccLen = ccLength
+		ccLen = k.ccLen()
 	} else if spi.PoRIntegrity != IntegrityNone {
 		return Response{}, errors.New("response: only a cryptographic checksum or no integrity is supported")
 	}
@@ -169,7 +174,7 @@ func EncodeResponse(k Keyset, spi SPI, r Response) (udh, ud []byte, err error) {
 
 	ccLen := 0
 	if spi.PoRIntegrity == IntegrityCC {
-		ccLen = ccLength
+		ccLen = k.ccLen()
 	}
 
 	data := r.Data

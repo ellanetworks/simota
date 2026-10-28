@@ -9,11 +9,11 @@ const card: Card = {
   imsi: "001010000000001",
   msisdn: "+15550000001",
   description: "Lab phone",
-  tar: "b00010",
+  tar: "b00001",
   kvn: 2,
   key_sets: [
-    { version: 1, algorithm: "3des" },
-    { version: 2, algorithm: "aes" },
+    { version: 1, algorithm: "3des", cc_length: 8, counter: 3 },
+    { version: 2, algorithm: "aes", cc_length: 4, counter: 0 },
   ],
   created_at: "2026-10-01T12:00:00.000Z",
   updated_at: "2026-10-02T08:30:00.123Z",
@@ -40,7 +40,7 @@ const serve = (
         const text = init?.body === undefined ? undefined : String(init.body);
         calls.push({
           method,
-          path: url.pathname,
+          path: url.pathname + url.search,
           ...(text === undefined
             ? {}
             : {
@@ -74,6 +74,16 @@ const serve = (
           cards = [updated];
           return json(200, { result: updated });
         }),
+        "/api/v1/smsc": recorded(() =>
+          json(200, {
+            result: {
+              host: "127.0.0.1",
+              originator: "+15550000000",
+              validity_seconds: 86400,
+              password_set: true,
+            },
+          }),
+        ),
         "/api/v1/cards/import": recorded(() =>
           json(200, { result: { created: 2, updated: 1 } }),
         ),
@@ -146,7 +156,17 @@ const openImport = async () => {
   return screen.getByRole("dialog", { name: "Import Cards" });
 };
 
-const chooseFile = (dialog: HTMLElement, content: string) =>
+// chooseFile chooses a key file, and the algorithm of its key sets unless told none.
+const chooseFile = (
+  dialog: HTMLElement,
+  content: string,
+  algorithm: "3DES" | "AES" | null = "3DES",
+) => {
+  pickFile(dialog, content);
+  if (algorithm) choose(dialog, /^Algorithm/, algorithm);
+};
+
+const pickFile = (dialog: HTMLElement, content: string) =>
   fireEvent.change(within(dialog).getByLabelText("Choose File"), {
     target: {
       files: [new File([content], "cards.csv", { type: "text/csv" })],
@@ -172,15 +192,13 @@ describe("Cards", () => {
     expect(
       screen.getByRole("heading", { name: "Cards (1)" }),
     ).toBeInTheDocument();
-    expect(rowCells(card.iccid).slice(0, 8)).toEqual([
+    // IMSI and Updated are hidden by default; the key set in use is marked.
+    expect(rowCells(card.iccid).slice(0, 5)).toEqual([
       "8949440000001659208",
-      "001010000000001",
       "+15550000001",
       "Lab phone",
-      "b00010",
-      "2",
-      "1, 2",
-      "2026-10-02 08:30:00",
+      "b00001",
+      "1 (3DES, counter 3)2 (AES, CC 4, counter 0) · in use",
     ]);
   });
 
@@ -244,7 +262,7 @@ describe("Add", () => {
         imsi: card.imsi,
         msisdn: "",
         description: "",
-        tar: "b00010",
+        tar: "b00001",
         kvn: 1,
         key_sets: [
           {
@@ -252,7 +270,6 @@ describe("Add", () => {
             algorithm: "3des",
             kic: KEY_16,
             kid: "11".repeat(16),
-            kik: "",
           },
         ],
       },
@@ -263,10 +280,57 @@ describe("Add", () => {
     expect(screen.getByText("Card added successfully.")).toBeInTheDocument();
   });
 
+  it("adds an AES key set with its checksum length", async () => {
+    const calls = serve();
+    renderWithClient(<Cards />);
+    const dialog = await openAdd();
+
+    expect(
+      within(dialog).getByText(
+        "RFM TAR that reaches ADF.USIM (TS 101 220), e.g. b00001; sysmoISIM: b00011",
+      ),
+    ).toBeInTheDocument();
+    fillValid(dialog);
+    expect(
+      within(dialog).queryByRole("textbox", { name: /^KIK/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("combobox", { name: /^CC Length/ }),
+    ).not.toBeInTheDocument();
+    choose(dialog, /^Algorithm/, "AES");
+    expect(
+      within(dialog).getByRole("combobox", { name: /^CC Length/ }),
+    ).toHaveTextContent("8");
+    choose(dialog, /^CC Length/, "4");
+    type(dialog, /^ICCID/, `${card.iccid}F`);
+    type(dialog, /^TAR/, "b00020");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({
+      iccid: `${card.iccid}F`,
+      imsi: card.imsi,
+      msisdn: "",
+      description: "",
+      tar: "b00020",
+      kvn: 1,
+      key_sets: [
+        {
+          version: 1,
+          algorithm: "aes",
+          cc_length: 4,
+          kic: KEY_16,
+          kid: "11".repeat(16),
+        },
+      ],
+    });
+  });
+
   it.each([
     ["ICCID of 17 digits", { ICCID: "89494400000016592" }],
     ["ICCID of 21 digits", { ICCID: "894944000000165920812" }],
-    ["ICCID with a letter", { ICCID: "894944000000165920F" }],
+    ["ICCID with a letter", { ICCID: "89494400000016592A8" }],
+    ["ICCID of 17 digits and an F", { ICCID: "89494400000016592F" }],
     ["empty ICCID", { ICCID: "" }],
     ["IMSI of 5 digits", { IMSI: "00101" }],
     ["IMSI of 16 digits", { IMSI: "0010100000000012" }],
@@ -274,7 +338,9 @@ describe("Add", () => {
     ["MSISDN without +", { MSISDN: "15550000001" }],
     ["MSISDN of 16 digits", { MSISDN: "+1234567890123456" }],
     ["TAR of 5 characters", { TAR: "b0001" }],
-    ["TAR that is not hex", { TAR: "g00010" }],
+    ["TAR that is not hex", { TAR: "g00001" }],
+    ["TAR of the UICC shared file system", { TAR: "b00000" }],
+    ["TAR past b0011f", { TAR: "b00120" }],
     ["empty TAR", { TAR: "" }],
     ["version 0", { Version: "0" }],
     ["version 16", { Version: "16" }],
@@ -283,10 +349,8 @@ describe("Add", () => {
     ["3DES KID of 15 bytes", { KID: "11".repeat(15) }],
     ["empty KID", { KID: "" }],
     ["KIc that is not hex", { KIc: `${"00".repeat(15)}zz` }],
-    ["3DES KIK of 8 bytes", { KIK: "22".repeat(8) }],
     ["AES KIc of 20 bytes", { aes: true, KIc: "00".repeat(20) }],
     ["AES KID of 33 bytes", { aes: true, KID: "11".repeat(33) }],
-    ["AES KIK of 8 bytes", { aes: true, KIK: "22".repeat(8) }],
   ] as [string, Record<string, string | boolean>][])(
     "disables Add for: %s",
     async (_name, { aes, ...fields }) => {
@@ -308,8 +372,10 @@ describe("Add", () => {
 
   it.each([
     ["an E.164 MSISDN", { MSISDN: "+15550000001" }],
-    ["an upper-case TAR", { TAR: "B00010" }],
-    ["a 3DES KIK of 16 bytes", { KIK: "22".repeat(16) }],
+    ["an upper-case TAR", { TAR: "B00001" }],
+    ["the TAR b00020", { TAR: "b00020" }],
+    ["the TAR b0011f", { TAR: "b0011f" }],
+    ["an ICCID with a trailing F", { ICCID: "8949440000001659208F" }],
     ["key set version 15", { Version: "15" }],
   ])("takes %s", async (_name, fields) => {
     serve();
@@ -333,7 +399,6 @@ describe("Add", () => {
     choose(dialog, /^Algorithm/, "AES");
     type(dialog, /^KIc/, "00".repeat(bytes));
     type(dialog, /^KID/, "11".repeat(bytes));
-    type(dialog, /^KIK/, "22".repeat(bytes));
     expect(submit).toBeEnabled();
   });
 
@@ -431,11 +496,11 @@ describe("Edit", () => {
       },
     });
     await waitFor(() =>
-      expect(rowCells(card.iccid).slice(2, 6)).toEqual([
+      expect(rowCells(card.iccid).slice(1, 5)).toEqual([
         "—",
         "Spare",
-        "b00010",
-        "1",
+        "b00001",
+        "1 (3DES, counter 3) · in use2 (AES, CC 4, counter 0)",
       ]),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -450,7 +515,7 @@ describe("Edit", () => {
 
     type(dialog, /^TAR/, "b0001");
     expect(submit).toBeDisabled();
-    type(dialog, /^TAR/, "b00011");
+    type(dialog, /^TAR/, "b00020");
     expect(submit).toBeEnabled();
   });
 
@@ -546,8 +611,14 @@ describe("Import", () => {
     const submit = within(dialog).getByRole("button", { name: "Import" });
 
     expect(submit).toBeDisabled();
-    chooseFile(dialog, "ICCID,IMSI,KIC1\n");
+    chooseFile(dialog, "ICCID,IMSI,KIC1\n", null);
     expect(within(dialog).getByText("cards.csv")).toBeInTheDocument();
+    // A key file does not tell its algorithm.
+    expect(submit).toBeDisabled();
+    choose(dialog, /^Algorithm/, "3DES");
+    expect(
+      within(dialog).queryByRole("combobox", { name: /^CC Length/ }),
+    ).not.toBeInTheDocument();
     fireEvent.click(submit);
 
     expect(
@@ -556,11 +627,37 @@ describe("Import", () => {
     expect(calls).toEqual([
       {
         method: "POST",
-        path: "/api/v1/cards/import",
+        path: "/api/v1/cards/import?algorithm=3des",
         body: "ICCID,IMSI,KIC1\n",
       },
     ]);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["8", "?algorithm=aes&cc_length=8"],
+    ["4", "?algorithm=aes&cc_length=4"],
+  ])("imports AES key sets with checksums of %s bytes", async (cc, query) => {
+    const calls = serve();
+    renderWithClient(<Cards />);
+    const dialog = await openImport();
+
+    chooseFile(dialog, "ICCID,IMSI,KIC1\n", "AES");
+    if (cc !== "8") choose(dialog, /^CC Length/, cc);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Import" }));
+
+    await screen.findByText("Imported 3 cards: 2 created, 1 updated");
+    expect(calls.map((c) => c.path)).toEqual([`/api/v1/cards/import${query}`]);
+  });
+
+  it("says what it imports", async () => {
+    serve();
+    renderWithClient(<Cards />);
+    const dialog = await openImport();
+
+    expect(dialog).toHaveTextContent(
+      "Imports ICCID, IMSI and the KIC/KID key sets; ignores Ki, OPc, PINs, ADM keys and KIKs.",
+    );
   });
 
   it("sends text/plain", async () => {
@@ -574,7 +671,7 @@ describe("Import", () => {
     await screen.findByText("Imported 3 cards: 2 created, 1 updated");
     const [, init] = vi
       .mocked(fetch)
-      .mock.calls.find(([url]) => String(url).endsWith("/import"))!;
+      .mock.calls.find(([url]) => String(url).includes("/import?"))!;
     expect(init?.headers).toEqual({ "Content-Type": "text/plain" });
   });
 
@@ -627,5 +724,59 @@ describe("Import", () => {
     expect(
       screen.getByRole("dialog", { name: "Import Cards" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("New job", () => {
+  it("opens the job dialog with the card chosen", async () => {
+    serve();
+    renderWithClient(<Cards />);
+    await grid();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: `New job for ${card.iccid}` }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "New Job" });
+    const chip = within(dialog).getByText(card.iccid).closest(".MuiChip-root");
+    expect(chip).not.toBeNull();
+    expect(
+      within(dialog).getByRole("button", { name: "Create" }),
+    ).toBeEnabled();
+  });
+
+  it("is disabled until the SMSC is set", async () => {
+    serve({
+      "/api/v1/smsc": () =>
+        json(200, {
+          result: {
+            host: "",
+            originator: "",
+            validity_seconds: 86400,
+            password_set: false,
+          },
+        }),
+    });
+    renderWithClient(<Cards />);
+    await grid();
+
+    const button = screen.getByRole("button", {
+      name: `New job for ${card.iccid}`,
+    });
+    await waitFor(() => expect(button).toBeDisabled());
+    fireEvent.mouseOver(button.parentElement!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Set the SMSC first",
+    );
+  });
+
+  it("is disabled for a card without an MSISDN", async () => {
+    serve({}, [{ ...card, msisdn: "" }]);
+    renderWithClient(<Cards />);
+    await grid();
+
+    expect(
+      screen.getByRole("button", { name: `New job for ${card.iccid}` }),
+    ).toBeDisabled();
   });
 });

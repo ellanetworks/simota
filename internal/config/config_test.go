@@ -34,12 +34,15 @@ func TestLoad(t *testing.T) {
 }
 
 func TestLoadRejects(t *testing.T) {
+	base := "db:\n  path: simota.db\napi:\n  address: 127.0.0.1\n"
+
 	for _, tc := range []struct{ yaml, err string }{
 		{"api:\n  address: 127.0.0.1\n", "db.path"},
 		{"db:\n  path: simota.db\n", "api.address"},
-		{"db:\n  path: simota.db\napi:\n  address: 127.0.0.1\n  port: 70000\n", "api.port"},
-		{"db:\n  path: simota.db\napi:\n  address: 127.0.0.1\nsmsc: {}\n", "smsc"},
+		{base + "  port: 70000\n", "api.port"},
 		{"db:\n  path: simota.db\napi:\n  address: localhost\n", "parse config"},
+		// The SMSC is set over the API, not in the file.
+		{base + "smsc:\n  url: http://127.0.0.1:5010\n", "smsc"},
 	} {
 		if _, err := config.Load(write(t, tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.err) {
 			t.Fatalf("Load(%q) = %v, want %q", tc.yaml, err, tc.err)

@@ -15,7 +15,7 @@ const sysmocom = "IMSI\tICCID\tACC\tPIN1\tPUK1\tPIN2\tPUK2\tKi\tOPC\tADM1\tKIC1\
 	"66666666666666666666666666666666\t77777777777777777777777777777777\t88888888888888888888888888888888\t\n"
 
 func TestParseSysmocom(t *testing.T) {
-	cards, err := Parse(strings.NewReader(sysmocom))
+	cards, err := Parse(strings.NewReader(sysmocom), "3des")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -30,20 +30,20 @@ func TestParseSysmocom(t *testing.T) {
 	}
 
 	k := c.KeySets[0]
-	if k.Version != 1 || k.Algorithm != "3des" || hex.EncodeToString(k.KIc) != strings.Repeat("11", 16) ||
-		hex.EncodeToString(k.KID) != strings.Repeat("22", 16) || hex.EncodeToString(k.KIK) != strings.Repeat("33", 16) {
+	if k.Version != 1 || hex.EncodeToString(k.KIc) != strings.Repeat("11", 16) || hex.EncodeToString(k.KID) != strings.Repeat("22", 16) {
 		t.Fatalf("key set 1 = %+v", k)
 	}
 
-	if c.KeySets[2].KIK != nil {
-		t.Fatalf("key set 3 KIK = %x, want none", c.KeySets[2].KIK)
+	// The same 16-octet keys are AES-128 keys when the card's key sets are AES.
+	if cards, err := Parse(strings.NewReader(sysmocom), "aes"); err != nil || len(cards[0].KeySets) != 3 {
+		t.Fatalf("Parse as AES = %+v, %v", cards, err)
 	}
 }
 
 func TestParseSkipsIncompleteKeySet(t *testing.T) {
 	file := strings.Replace(sysmocom, "\t88888888888888888888888888888888\t\n", "\t\t\n", 1)
 
-	cards, err := Parse(strings.NewReader(file))
+	cards, err := Parse(strings.NewReader(file), "3des")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -53,30 +53,40 @@ func TestParseSkipsIncompleteKeySet(t *testing.T) {
 	}
 }
 
-func TestParseComma(t *testing.T) {
-	cards, err := Parse(strings.NewReader("ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001," +
-		strings.Repeat("11", 16) + "," + strings.Repeat("22", 16) + "\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+func TestParseICCIDPadding(t *testing.T) {
+	cards, err := Parse(strings.NewReader("ICCID,IMSI,KIC1,KID1\n894944000000165920F,001010000000001,"+
+		strings.Repeat("11", 16)+","+strings.Repeat("22", 16)+"\n"), "3des")
+	if err != nil || cards[0].ICCID != "894944000000165920" {
+		t.Fatalf("cards = %+v, %v", cards, err)
 	}
 
-	if len(cards) != 1 || len(cards[0].KeySets) != 1 || cards[0].KeySets[0].KIK != nil {
-		t.Fatalf("cards = %+v", cards)
+	for in, want := range map[string]string{"8949440000001659208": "8949440000001659208", "894944000000165920f": "894944000000165920"} {
+		if got := NormalICCID(in); got != want {
+			t.Fatalf("NormalICCID(%s) = %s", in, got)
+		}
 	}
 }
 
 func TestParseRejects(t *testing.T) {
+	k16 := strings.Repeat("11", 16)
+
 	for _, file := range []string{
 		"",
 		"ICCID,IMSI\n",
 		"ICCID,KIC1\n8988211000000000017,00\n",
-		"ICCID,IMSI,KIC1\n8988211000000000017,001010000000001," + strings.Repeat("11", 16) + "\n",
+		"ICCID,IMSI,KIC1\n8988211000000000017,001010000000001," + k16 + "\n",
 		"ICCID,IMSI\n12,001010000000001\n",
 		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001,zz,00\n",
 		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001,0011,0011\n",
+		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001," + k16 + "," + strings.Repeat("22", 24) + "\n",
+		"ICCID,IMSI,KIC1,KID1\n8988211000000000017,001010000000001," + strings.Repeat("11", 24) + "," + strings.Repeat("22", 24) + "\n",
 	} {
-		if _, err := Parse(strings.NewReader(file)); !errors.Is(err, ErrFormat) {
+		if _, err := Parse(strings.NewReader(file), "3des"); !errors.Is(err, ErrFormat) {
 			t.Fatalf("Parse(%q) = %v, want ErrFormat", file, err)
 		}
+	}
+
+	if _, err := Parse(strings.NewReader(sysmocom), "des"); err == nil {
+		t.Fatal("expected an error for an unknown algorithm")
 	}
 }

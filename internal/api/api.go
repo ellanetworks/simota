@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ellanetworks/simota/internal/db"
+	"github.com/ellanetworks/simota/internal/gateway"
 )
 
 type Store interface {
@@ -23,13 +24,29 @@ type Store interface {
 	GetCard(ctx context.Context, iccid string) (db.Card, error)
 	ListCards(ctx context.Context, page, perPage int) ([]db.Card, int, error)
 	ImportCards(ctx context.Context, cards []db.Card) (created, updated int, err error)
+	CreateJobs(ctx context.Context, jobs []db.Job) ([]int64, error)
+	GetJob(ctx context.Context, id int64) (db.Job, error)
+	ListJobs(ctx context.Context, iccid string, page, perPage int) ([]db.Job, int, error)
+	SetCounter(ctx context.Context, iccid string, version int, counter uint64) error
+	GetSMSC(ctx context.Context) (db.SMSC, error)
+	PutSMSC(ctx context.Context, s db.SMSC) error
 }
 
 type Config struct {
 	Store    Store
 	Frontend fs.FS
 	Version  string
-	Logger   *slog.Logger
+	// Notify, when set, tells the job runner that jobs are queued or the SMSC changed.
+	Notify func()
+	// Gateway, when set, is the SMPP session to the SMSC: PUT /api/v1/smsc applies its settings, GET shows its state.
+	Gateway Gateway
+	Logger  *slog.Logger
+}
+
+// Gateway is the SMPP session to the SMSC.
+type Gateway interface {
+	Apply(s *gateway.Settings) error
+	State() gateway.State
 }
 
 const (
@@ -55,6 +72,12 @@ func NewHandler(cfg Config) http.Handler {
 	mux.Handle("GET /api/v1/cards/{iccid}", GetCard(cfg))
 	mux.Handle("PUT /api/v1/cards/{iccid}", UpdateCard(cfg))
 	mux.Handle("DELETE /api/v1/cards/{iccid}", DeleteCard(cfg))
+	mux.Handle("PUT /api/v1/cards/{iccid}/key-sets/{version}", UpdateKeySet(cfg))
+	mux.Handle("POST /api/v1/jobs", CreateJobs(cfg))
+	mux.Handle("GET /api/v1/jobs", ListJobs(cfg))
+	mux.Handle("GET /api/v1/jobs/{id}", GetJob(cfg))
+	mux.Handle("GET /api/v1/smsc", GetSMSC(cfg))
+	mux.Handle("PUT /api/v1/smsc", UpdateSMSC(cfg))
 
 	if cfg.Frontend != nil {
 		mux.Handle("GET /", Frontend(cfg.Frontend))
