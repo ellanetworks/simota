@@ -1,0 +1,8 @@
+logging:
+  level: info
+db:
+  path: simota.db
+api:
+  # The API and the UI have no authentication: keep them on the loopback interface.
+  address: 127.0.0.1
+  port: 5020

@@ -80,8 +80,10 @@ func (c Command) encode(spi [2]byte) (udh, ud []byte, err error) {
 	chl := 13 + ccLen
 	cpl := 1 + chl + len(data)
 
-	header := []byte{byte(cpl >> 8), byte(cpl), byte(chl), spi[0], spi[1], c.Keyset.keyID(c.SPI.Ciphering),
-		c.Keyset.keyID(c.SPI.Integrity == IntegrityCC), c.TAR[0], c.TAR[1], c.TAR[2]}
+	header := []byte{
+		byte(cpl >> 8), byte(cpl), byte(chl), spi[0], spi[1], c.Keyset.keyID(c.SPI.Ciphering),
+		c.Keyset.keyID(c.SPI.Integrity == IntegrityCC), c.TAR[0], c.TAR[1], c.TAR[2],
+	}
 
 	counter := make([]byte, counterLength+1)
 	for i := range counterLength {

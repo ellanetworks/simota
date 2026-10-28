@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Box, Button, Typography } from "@mui/material";
-import { UploadFile as UploadFileIcon } from "@mui/icons-material";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import EditDialog from "@/components/EditDialog";
 import { useSnackbar } from "@/contexts/SnackbarContext";
@@ -52,12 +51,7 @@ export default function ImportCardsDialog({
         PINs and ADM keys.
       </Typography>
       <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-        <Button
-          component="label"
-          variant="outlined"
-          startIcon={<UploadFileIcon />}
-          sx={{ flexShrink: 0 }}
-        >
+        <Button component="label" variant="outlined" sx={{ flexShrink: 0 }}>
           Choose File
           <input
             type="file"

@@ -168,9 +168,9 @@ func TestDecodeResponse(t *testing.T) {
 	signed := secured
 	signed.PoRCiphering = false
 
-	clear := secured
-	clear.PoRCiphering = false
-	clear.PoRIntegrity = IntegrityNone
+	plain := secured
+	plain.PoRCiphering = false
+	plain.PoRIntegrity = IntegrityNone
 
 	cases := []struct {
 		name     string
@@ -209,7 +209,7 @@ func TestDecodeResponse(t *testing.T) {
 		{
 			name:   "3DES clear",
 			keyset: pysim3DES(t),
-			spi:    clear,
+			spi:    plain,
 			packet: "027100000e0ab000110000000000000001612f",
 			tar:    "b00011",
 			data:   "01612f",

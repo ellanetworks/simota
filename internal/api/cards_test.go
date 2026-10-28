@@ -14,6 +14,7 @@ import (
 
 	"github.com/ellanetworks/simota/internal/api"
 	"github.com/ellanetworks/simota/internal/db"
+	"gopkg.in/yaml.v3"
 )
 
 type env struct {
@@ -39,7 +40,7 @@ func newEnv(t *testing.T) env {
 func (e env) do(t *testing.T, method, path, contentType, body string) (int, string) {
 	t.Helper()
 
-	req, err := http.NewRequest(method, e.srv.URL+path, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, e.srv.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +114,9 @@ func TestCardLifecycle(t *testing.T) {
 		t.Fatalf("list = %d %s", code, body)
 	}
 
-	if code, _ := e.do(t, http.MethodDelete, "/api/v1/cards/8988211000000000017", "", ""); code != http.StatusNoContent {
-		t.Fatalf("delete = %d", code)
+	if code, body := e.do(t, http.MethodDelete, "/api/v1/cards/8988211000000000017", "", ""); code != http.StatusOK ||
+		body != `{"result":{"message":"Card deleted successfully"}}` {
+		t.Fatalf("delete = %d %s", code, body)
 	}
 
 	if code, _ := e.do(t, http.MethodGet, "/api/v1/cards/8988211000000000017", "", ""); code != http.StatusNotFound {
@@ -179,6 +181,7 @@ func TestFrontend(t *testing.T) {
 		"assets/app.js": {Data: []byte("app")},
 		"favicon.svg":   {Data: []byte("<svg/>")},
 	}
+
 	srv := httptest.NewServer(api.NewHandler(api.Config{Frontend: ui, Logger: slog.New(slog.DiscardHandler)}))
 	defer srv.Close()
 
@@ -193,7 +196,12 @@ func TestFrontend(t *testing.T) {
 		{"/favicon.svg", "<svg/>", http.StatusOK, false},
 		{"/api/v1/unknown", "", http.StatusNotFound, false},
 	} {
-		resp, err := http.Get(srv.URL + tc.path)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,6 +232,99 @@ func TestBadRequests(t *testing.T) {
 	} {
 		if code, body := e.do(t, tc.method, tc.path, "application/json", tc.body); code != tc.code {
 			t.Fatalf("%s %s %s = %d %s, want %d", tc.method, tc.path, tc.body, code, body, tc.code)
+		}
+	}
+}
+
+func TestListCardsPages(t *testing.T) {
+	e := newEnv(t)
+
+	for _, iccid := range []string{"8988211000000000017", "8988211000000000025", "8988211000000000033"} {
+		body := strings.Replace(cardBody(), "8988211000000000017", iccid, 1)
+		if code, b := e.do(t, http.MethodPost, "/api/v1/cards", "application/json", body); code != http.StatusCreated {
+			t.Fatalf("create = %d %s", code, b)
+		}
+	}
+
+	code, body := e.do(t, http.MethodGet, "/api/v1/cards?page=2&per_page=2", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("list = %d %s", code, body)
+	}
+
+	var page struct{ Result api.ListCardsResponse }
+	if err := json.Unmarshal([]byte(body), &page); err != nil {
+		t.Fatal(err)
+	}
+
+	if page.Result.Page != 2 || page.Result.PerPage != 2 || page.Result.TotalCount != 3 || len(page.Result.Items) != 1 ||
+		page.Result.Items[0].ICCID != "8988211000000000033" {
+		t.Fatalf("page = %+v", page.Result)
+	}
+
+	// Timestamps have milliseconds, as in Ella SMSC and Ella IMS.
+	if ts := page.Result.Items[0].CreatedAt; len(ts) != len("2026-10-28T17:34:53.000Z") || !strings.HasSuffix(ts, "Z") {
+		t.Fatalf("created_at = %q", ts)
+	}
+
+	_, body = e.do(t, http.MethodGet, "/api/v1/cards", "", "")
+	if !strings.Contains(body, `"page":1,"per_page":25,"total_count":3`) {
+		t.Fatalf("default page = %s", body)
+	}
+
+	for _, q := range []string{"page=0", "page=x", "per_page=0", "per_page=101"} {
+		if code, _ := e.do(t, http.MethodGet, "/api/v1/cards?"+q, "", ""); code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", q, code)
+		}
+	}
+}
+
+func TestUnknownFieldsRejected(t *testing.T) {
+	e := newEnv(t)
+
+	body := strings.Replace(cardBody(), `"tar":"b00010"`, `"tar":"b00010","adm1":"12345678"`, 1)
+	if code, b := e.do(t, http.MethodPost, "/api/v1/cards", "application/json", body); code != http.StatusBadRequest ||
+		b != `{"error":"Invalid request data"}` {
+		t.Fatalf("create with an unknown field = %d %s", code, b)
+	}
+}
+
+func TestHealthAndSpec(t *testing.T) {
+	e := newEnv(t)
+
+	for _, p := range []string{"/api/v1/livez", "/api/v1/readyz"} {
+		if code, _ := e.do(t, http.MethodGet, p, "", ""); code != http.StatusNoContent {
+			t.Fatalf("%s = %d", p, code)
+		}
+	}
+
+	if code, body := e.do(t, http.MethodGet, "/api/v1/openapi.yaml", "", ""); code != http.StatusOK || !strings.HasPrefix(body, "openapi: ") {
+		t.Fatalf("openapi = %d", code)
+	}
+}
+
+// TestOpenAPISpecCoversRoutes checks that the specification documents every route.
+func TestOpenAPISpecCoversRoutes(t *testing.T) {
+	e := newEnv(t)
+
+	_, body := e.do(t, http.MethodGet, "/api/v1/openapi.yaml", "", "")
+
+	var spec struct {
+		OpenAPI string                    `yaml:"openapi"`
+		Paths   map[string]map[string]any `yaml:"paths"`
+	}
+
+	if err := yaml.Unmarshal([]byte(body), &spec); err != nil {
+		t.Fatalf("invalid YAML: %v", err)
+	}
+
+	for _, route := range []string{
+		"GET /api/v1/cards", "POST /api/v1/cards", "POST /api/v1/cards/import", "GET /api/v1/cards/{iccid}",
+		"PUT /api/v1/cards/{iccid}", "DELETE /api/v1/cards/{iccid}", "GET /api/v1/status", "GET /api/v1/livez",
+		"GET /api/v1/readyz", "GET /api/v1/openapi.yaml",
+	} {
+		method, path, _ := strings.Cut(route, " ")
+		if _, ok := spec.Paths[path][strings.ToLower(method)]; !ok {
+			t.Errorf("spec is missing %s", route)
 		}
 	}
 }

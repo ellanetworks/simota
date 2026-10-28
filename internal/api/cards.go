@@ -2,13 +2,11 @@ package api
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
-	"time"
 
 	"github.com/ellanetworks/simota/internal/cardfile"
 	"github.com/ellanetworks/simota/internal/db"
@@ -42,7 +40,10 @@ type KeySetStatus struct {
 }
 
 type ListCardsResponse struct {
-	Items []Card `json:"items"`
+	Items      []Card `json:"items"`
+	Page       int    `json:"page"`
+	PerPage    int    `json:"per_page"`
+	TotalCount int    `json:"total_count"`
 }
 
 type CreateCardParams struct {
@@ -78,7 +79,12 @@ type ImportCardsResponse struct {
 
 func ListCards(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cards, err := cfg.Store.ListCards(r.Context())
+		page, perPage, ok := pagination(w, r, cfg)
+		if !ok {
+			return
+		}
+
+		cards, total, err := cfg.Store.ListCards(r.Context(), page, perPage)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to list cards", err, cfg.Logger)
 			return
@@ -89,7 +95,7 @@ func ListCards(cfg Config) http.Handler {
 			items = append(items, cardResponse(c))
 		}
 
-		writeResponse(w, ListCardsResponse{Items: items}, http.StatusOK, cfg.Logger)
+		writeResponse(w, ListCardsResponse{Items: items, Page: page, PerPage: perPage, TotalCount: total}, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -113,8 +119,7 @@ func GetCard(cfg Config) http.Handler {
 func CreateCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var p CreateCardParams
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request body", err, cfg.Logger)
+		if !decodeBody(w, r, &p, cfg) {
 			return
 		}
 
@@ -148,8 +153,7 @@ func CreateCard(cfg Config) http.Handler {
 func UpdateCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var p UpdateCardParams
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request body", err, cfg.Logger)
+		if !decodeBody(w, r, &p, cfg) {
 			return
 		}
 
@@ -204,14 +208,14 @@ func DeleteCard(cfg Config) http.Handler {
 			return
 		}
 
-		w.WriteHeader(http.StatusNoContent)
+		writeResponse(w, SuccessResponse{Message: "Card deleted successfully"}, http.StatusOK, cfg.Logger)
 	})
 }
 
 // ImportCards stores the cards of a vendor's key file, sent as the request body.
 func ImportCards(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parsed, err := cardfile.Parse(r.Body)
+		parsed, err := cardfile.Parse(http.MaxBytesReader(w, r.Body, maxImportBody))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
@@ -348,7 +352,7 @@ func cardResponse(c db.Card) Card {
 	out := Card{
 		ICCID: c.ICCID, IMSI: c.IMSI, MSISDN: c.MSISDN, Description: c.Description, TAR: hex.EncodeToString(c.TAR),
 		KVN: c.KVN, KeySets: make([]KeySetStatus, 0, len(c.KeySets)),
-		CreatedAt: c.CreatedAt.UTC().Format(time.RFC3339), UpdatedAt: c.UpdatedAt.UTC().Format(time.RFC3339),
+		CreatedAt: formatTime(c.CreatedAt), UpdatedAt: formatTime(c.UpdatedAt),
 	}
 
 	for _, k := range c.KeySets {

@@ -42,7 +42,7 @@ func (e SelectorEntry) Encode() ([]byte, error) {
 		return []byte{0xff, 0xff, 0xff, 0x00, 0x00}, nil
 	}
 
-	if !digits(e.MCC, 3, 3) || !digits(e.MNC, 2, 3) {
+	if !digits(e.MCC, 3) || !digits(e.MNC, 2) {
 		return nil, fmt.Errorf("invalid PLMN %s/%s", e.MCC, e.MNC)
 	}
 
@@ -84,7 +84,7 @@ func DecodeSelector(b []byte) ([]SelectorEntry, error) {
 		}
 
 		e := SelectorEntry{MCC: string(mcc), MNC: string(mnc), Access: AccessTechnology(p[3])<<8 | AccessTechnology(p[4])}
-		if !digits(e.MCC, 3, 3) || !digits(e.MNC, 2, 3) {
+		if !digits(e.MCC, 3) || !digits(e.MNC, 2) {
 			return nil, fmt.Errorf("entry %d: invalid PLMN %x", i/selectorEntryLength+1, p[:3])
 		}
 
@@ -118,8 +118,9 @@ func (a AccessTechnology) String() string {
 	return strings.Join(names, ", ")
 }
 
-func digits(s string, lo, hi int) bool {
-	if len(s) < lo || len(s) > hi {
+// digits reports whether s is lo to 3 decimal digits, as an MCC or MNC is.
+func digits(s string, lo int) bool {
+	if len(s) < lo || len(s) > 3 {
 		return false
 	}
 

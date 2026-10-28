@@ -19,7 +19,7 @@ import (
 )
 
 const usage = `usage: simota [flags] <command>
-       simota serve [-addr 127.0.0.1:5020] [-db simota.db]
+       simota serve [-config simota.yaml]
 
 commands:
   oplmn read                       read EF.OPLMNwAcT
@@ -47,7 +47,7 @@ func run() error {
 
 	fs := flag.NewFlagSet("simota", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), usage)
+		_, _ = fmt.Fprint(fs.Output(), usage)
 		fs.PrintDefaults()
 	}
 
@@ -227,12 +227,14 @@ func parseAccess(s string) (rfm.AccessTechnology, error) {
 }
 
 func send(ctx context.Context, out io.Writer, c *smsc.Client, cmd ota.Command, from, to string, selector bool) error {
+	printf := func(format string, a ...any) { _, _ = fmt.Fprintf(out, format, a...) }
+
 	udh, ud, err := cmd.Encode()
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(out, "command packet: %x %x\n", udh, ud)
+	printf("command packet: %x %x\n", udh, ud)
 
 	id, err := c.SubmitBinary(ctx, from, to, smsc.Binary{
 		ProtocolIdentifier: smsc.ProtocolUSIMDataDownload,
@@ -244,14 +246,14 @@ func send(ctx context.Context, out io.Writer, c *smsc.Client, cmd ota.Command, f
 		return err
 	}
 
-	fmt.Fprintf(out, "message %d queued\n", id)
+	printf("message %d queued\n", id)
 
 	m, err := c.Wait(ctx, id, time.Second)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(out, "message %d %s\n", id, m.Status)
+	printf("message %d %s\n", id, m.Status)
 
 	reports, err := c.DeliverReports(ctx, id)
 	if err != nil {
@@ -263,20 +265,20 @@ func send(ctx context.Context, out io.Writer, c *smsc.Client, cmd ota.Command, f
 	}
 
 	last := reports[len(reports)-1]
-	fmt.Fprintf(out, "response packet: %x %x\n", last.UserDataHeader, last.UserData)
+	printf("response packet: %x %x\n", last.UserDataHeader, last.UserData)
 
 	r, err := ota.DecodeResponse(cmd.Keyset, cmd.SPI, last.UserDataHeader, last.UserData)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(out, "PoR: %s, TAR %x", r.Status, r.TAR)
+	printf("PoR: %s, TAR %x", r.Status, r.TAR)
 
 	if r.Unsecured {
-		fmt.Fprint(out, ", unsecured")
+		printf(", unsecured")
 	}
 
-	fmt.Fprintln(out)
+	printf("\n")
 
 	if r.Status != ota.StatusPoROK {
 		return fmt.Errorf("card refused the command: %s", r.Status)
@@ -287,7 +289,7 @@ func send(ctx context.Context, out io.Writer, c *smsc.Client, cmd ota.Command, f
 		return err
 	}
 
-	fmt.Fprintf(out, "script: %d commands executed, last status word %04x, data %x\n", rr.Executed, rr.StatusWord, rr.Data)
+	printf("script: %d commands executed, last status word %04x, data %x\n", rr.Executed, rr.StatusWord, rr.Data)
 
 	if !rr.OK() {
 		return fmt.Errorf("command %d failed with status word %04x", rr.Executed, rr.StatusWord)
@@ -301,11 +303,11 @@ func send(ctx context.Context, out io.Writer, c *smsc.Client, cmd ota.Command, f
 
 		for i, e := range entries {
 			if e == rfm.Empty {
-				fmt.Fprintf(out, "  %2d  -\n", i+1)
+				printf("  %2d  -\n", i+1)
 				continue
 			}
 
-			fmt.Fprintf(out, "  %2d  %s/%s  %s\n", i+1, e.MCC, e.MNC, e.Access)
+			printf("  %2d  %s/%s  %s\n", i+1, e.MCC, e.MNC, e.Access)
 		}
 	}
 

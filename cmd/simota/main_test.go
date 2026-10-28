@@ -137,11 +137,13 @@ func TestCardSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := db.Card{ICCID: "8949440000001659208", IMSI: "001010000000001", MSISDN: "+15550000001", TAR: []byte{0xb0, 0x00, 0x10}, KVN: 2,
+	c := db.Card{
+		ICCID: "8949440000001659208", IMSI: "001010000000001", MSISDN: "+15550000001", TAR: []byte{0xb0, 0x00, 0x10}, KVN: 2,
 		KeySets: []db.KeySet{
 			{Version: 1, Algorithm: "3des", KIc: make([]byte, 16), KID: make([]byte, 16)},
 			{Version: 2, Algorithm: "aes", KIc: make([]byte, 16), KID: make([]byte, 16)},
-		}}
+		},
+	}
 	if err := store.CreateCard(ctx, c); err != nil {
 		t.Fatal(err)
 	}

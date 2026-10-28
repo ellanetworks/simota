@@ -15,8 +15,8 @@ const card: Card = {
     { version: 1, algorithm: "3des" },
     { version: 2, algorithm: "aes" },
   ],
-  created_at: "2026-10-01T12:00:00Z",
-  updated_at: "2026-10-02T08:30:00Z",
+  created_at: "2026-10-01T12:00:00.000Z",
+  updated_at: "2026-10-02T08:30:00.123Z",
 };
 
 const cardPath = `/api/v1/cards/${card.iccid}`;
@@ -26,8 +26,11 @@ type Call = { method: string; path: string; body?: unknown };
 type Route = (url: URL, init?: RequestInit) => Response;
 
 // serve is the cards API over a list of cards that its writes change. A route in overrides answers instead.
-const serve = (overrides: Record<string, Route> = {}) => {
-  let cards: Card[] = [card];
+const serve = (
+  overrides: Record<string, Route> = {},
+  initial: Card[] = [card],
+) => {
+  let cards = initial;
   const calls: Call[] = [];
   const recorded =
     (route: Route): Route =>
@@ -54,16 +57,18 @@ const serve = (overrides: Record<string, Route> = {}) => {
     "fetch",
     vi.fn(
       stubApi({
-        "/api/v1/cards": recorded((_url, init) => {
+        "/api/v1/cards": recorded((url, init) => {
           if (init?.method === "POST") {
             return json(201, { result: card });
           }
-          return json(200, { result: { items: cards } });
+          return json(200, { result: page(url, cards) });
         }),
         [cardPath]: recorded((_url, init) => {
           if (init?.method === "DELETE") {
             cards = [];
-            return new Response(null, { status: 204 });
+            return json(200, {
+              result: { message: "Card deleted successfully" },
+            });
           }
           const updated = { ...card, ...JSON.parse(String(init?.body)) };
           cards = [updated];
@@ -78,13 +83,29 @@ const serve = (overrides: Record<string, Route> = {}) => {
   return calls;
 };
 
+// page is the page of cards that url asks for, as the server paginates them.
+const page = (url: URL, cards: Card[]) => {
+  const number = Number(url.searchParams.get("page") ?? 1);
+  const perPage = Number(url.searchParams.get("per_page") ?? 25);
+  return {
+    items: cards.slice((number - 1) * perPage, number * perPage),
+    page: number,
+    per_page: perPage,
+    total_count: cards.length,
+  };
+};
+
 const fail = (status: number, error: string) => () => json(status, { error });
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const grid = () => screen.findByRole("grid", { name: "Cards" });
+// grid is the grid once the first page of cards has loaded, which the count in the heading tells.
+const grid = async () => {
+  await screen.findByRole("heading", { name: /^Cards \(\d+\)$/ });
+  return screen.getByRole("grid", { name: "Cards" });
+};
 
 const rowCells = (iccid: string) =>
   within(
@@ -116,7 +137,7 @@ const openAdd = async () => {
 const openEdit = async () => {
   await grid();
   fireEvent.click(screen.getByRole("button", { name: `Edit ${card.iccid}` }));
-  return screen.getByRole("dialog", { name: `Edit Card ${card.iccid}` });
+  return screen.getByRole("dialog", { name: "Edit Card" });
 };
 
 const openImport = async () => {
@@ -163,6 +184,36 @@ describe("Cards", () => {
     ]);
   });
 
+  it("pages the cards on the server", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      ...card,
+      iccid: `89494400000016592${String(i).padStart(2, "0")}`,
+    }));
+    serve({}, many);
+    renderWithClient(<Cards />);
+
+    await grid();
+    expect(
+      await screen.findByRole("heading", { name: "Cards (30)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1–25 of 30")).toBeInTheDocument();
+    expect(screen.getByText(many[24].iccid)).toBeInTheDocument();
+    expect(screen.queryByText(many[25].iccid)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to next page" }));
+
+    expect(await screen.findByText(many[25].iccid)).toBeInTheDocument();
+    expect(screen.getByText("26–30 of 30")).toBeInTheDocument();
+    const lists = vi
+      .mocked(fetch)
+      .mock.calls.map(([url]) => String(url))
+      .filter((url) => url.startsWith("/api/v1/cards?"));
+    expect(lists).toEqual([
+      "/api/v1/cards?page=1&per_page=25",
+      "/api/v1/cards?page=2&per_page=25",
+    ]);
+  });
+
   it("shows why the cards failed to load", async () => {
     serve({ "/api/v1/cards": fail(500, "database is locked") });
     renderWithClient(<Cards />);
@@ -170,7 +221,6 @@ describe("Cards", () => {
     expect(await screen.findByText("Failed to load cards")).toBeInTheDocument();
     expect(screen.getByText("database is locked")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
-    expect(screen.queryByRole("grid")).not.toBeInTheDocument();
   });
 });
 
@@ -309,7 +359,7 @@ describe("Add", () => {
       "/api/v1/cards": (url, init) =>
         init?.method === "POST"
           ? json(status, { error })
-          : json(200, { result: { items: [card] } }),
+          : json(200, { result: page(url, [card]) }),
     });
     renderWithClient(<Cards />);
     const dialog = await openAdd();
@@ -332,6 +382,8 @@ describe("Edit", () => {
     renderWithClient(<Cards />);
     const dialog = await openEdit();
 
+    expect(textbox(dialog, /^ICCID/).value).toBe(card.iccid);
+    expect(textbox(dialog, /^ICCID/)).toBeDisabled();
     expect(textbox(dialog, /^IMSI/).value).toBe(card.imsi);
     expect(textbox(dialog, /^MSISDN/).value).toBe(card.msisdn);
     expect(textbox(dialog, /^Description/).value).toBe(card.description);
@@ -416,7 +468,7 @@ describe("Edit", () => {
       await within(dialog).findByText(`Could not update the card: ${error}`),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: `Edit Card ${card.iccid}` }),
+      screen.getByRole("dialog", { name: "Edit Card" }),
     ).toBeInTheDocument();
   });
 });
@@ -459,9 +511,7 @@ describe("Delete", () => {
     await waitFor(() =>
       expect(calls).toEqual([{ method: "DELETE", path: cardPath }]),
     );
-    expect(
-      await screen.findByText("No cards. Add one, or import a key file."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No cards.")).toBeInTheDocument();
     expect(screen.queryByText(card.iccid)).not.toBeInTheDocument();
     expect(screen.getByText("Card deleted successfully.")).toBeInTheDocument();
   });

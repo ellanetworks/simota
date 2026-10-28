@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -84,9 +85,16 @@ func (d *DB) GetCard(ctx context.Context, iccid string) (Card, error) {
 	return cards[0], nil
 }
 
-// ListCards lists the cards by ICCID.
-func (d *DB) ListCards(ctx context.Context) ([]Card, error) {
-	return d.cards(ctx, "")
+// ListCards lists a page, from 1, of the cards by ICCID, and the number of cards.
+func (d *DB) ListCards(ctx context.Context, page, perPage int) ([]Card, int, error) {
+	var total int
+	if err := d.conn.QueryRowContext(ctx, "SELECT count(*) FROM cards").Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count cards: %w", err)
+	}
+
+	cards, err := d.cards(ctx, "ORDER BY iccid LIMIT ? OFFSET ?", perPage, (page-1)*perPage)
+
+	return cards, total, err
 }
 
 // ImportCards stores cards from a vendor's key file: a new card is created, and an existing card gets the IMSI and
@@ -140,9 +148,10 @@ func putKeySets(ctx context.Context, tx *sql.Tx, iccid string, sets []KeySet) er
 	return nil
 }
 
-func (d *DB) cards(ctx context.Context, where string, args ...any) ([]Card, error) {
+// cards are the cards that clause, the end of a SELECT from cards, selects, with their key sets.
+func (d *DB) cards(ctx context.Context, clause string, args ...any) ([]Card, error) {
 	rows, err := d.conn.QueryContext(ctx, `SELECT iccid, imsi, msisdn, description, tar, kvn, created_at, updated_at
-		FROM cards `+where+` ORDER BY iccid`, args...)
+		FROM cards `+clause, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list cards: %w", err)
 	}
@@ -172,7 +181,17 @@ func (d *DB) cards(ctx context.Context, where string, args ...any) ([]Card, erro
 		return nil, fmt.Errorf("list cards: %w", err)
 	}
 
-	keyRows, err := d.conn.QueryContext(ctx, "SELECT iccid, version, algorithm, kic, kid, kik FROM key_sets ORDER BY iccid, version")
+	if len(cards) == 0 {
+		return cards, nil
+	}
+
+	iccids := make([]any, 0, len(cards))
+	for _, c := range cards {
+		iccids = append(iccids, c.ICCID)
+	}
+
+	keyRows, err := d.conn.QueryContext(ctx, `SELECT iccid, version, algorithm, kic, kid, kik FROM key_sets
+		WHERE iccid IN (?`+strings.Repeat(", ?", len(iccids)-1)+`) ORDER BY iccid, version`, iccids...)
 	if err != nil {
 		return nil, fmt.Errorf("list key sets: %w", err)
 	}

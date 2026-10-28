@@ -29,8 +29,10 @@ func open(t *testing.T) (*db.DB, string) {
 func card(iccid string, versions ...int) db.Card {
 	c := db.Card{ICCID: iccid, IMSI: "001010000000001", TAR: []byte{0xb0, 0x00, 0x10}, KVN: versions[0]}
 	for _, v := range versions {
-		c.KeySets = append(c.KeySets, db.KeySet{Version: v, Algorithm: "3des", KIc: bytes.Repeat([]byte{byte(v)}, 16),
-			KID: bytes.Repeat([]byte{byte(v + 0x10)}, 16)})
+		c.KeySets = append(c.KeySets, db.KeySet{
+			Version: v, Algorithm: "3des", KIc: bytes.Repeat([]byte{byte(v)}, 16),
+			KID: bytes.Repeat([]byte{byte(v + 0x10)}, 16),
+		})
 	}
 
 	return c
@@ -155,13 +157,23 @@ func TestImportCards(t *testing.T) {
 		t.Fatalf("imported over = %+v", got)
 	}
 
-	cards, err := d.ListCards(ctx)
+	cards, total, err := d.ListCards(ctx, 1, 25)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(cards) != 2 || cards[0].ICCID != "8988211000000000017" || len(cards[1].KeySets) != 1 {
-		t.Fatalf("cards = %+v", cards)
+	if total != 2 || len(cards) != 2 || cards[0].ICCID != "8988211000000000017" || len(cards[1].KeySets) != 1 {
+		t.Fatalf("cards = %+v, total %d", cards, total)
+	}
+
+	// The second page of one holds the second card, with its own key sets only.
+	cards, total, err = d.ListCards(ctx, 2, 1)
+	if err != nil || total != 2 || len(cards) != 1 || cards[0].ICCID != "8988211000000000025" || len(cards[0].KeySets) != 1 {
+		t.Fatalf("page 2 = %+v, total %d, %v", cards, total, err)
+	}
+
+	if cards, _, _ := d.ListCards(ctx, 3, 1); len(cards) != 0 {
+		t.Fatalf("page 3 = %+v", cards)
 	}
 }
 
@@ -176,7 +188,7 @@ func TestImportCardsIsAtomic(t *testing.T) {
 		t.Fatal("expected an error for a key set the schema refuses")
 	}
 
-	if cards, _ := d.ListCards(ctx); len(cards) != 0 {
+	if cards, _, _ := d.ListCards(ctx, 1, 25); len(cards) != 0 {
 		t.Fatalf("a failed import left %d cards", len(cards))
 	}
 }

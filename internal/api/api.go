@@ -3,12 +3,15 @@ package api
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ellanetworks/simota/internal/db"
 )
@@ -18,7 +21,7 @@ type Store interface {
 	UpdateCard(ctx context.Context, c db.Card) error
 	DeleteCard(ctx context.Context, iccid string) error
 	GetCard(ctx context.Context, iccid string) (db.Card, error)
-	ListCards(ctx context.Context) ([]db.Card, error)
+	ListCards(ctx context.Context, page, perPage int) ([]db.Card, int, error)
 	ImportCards(ctx context.Context, cards []db.Card) (created, updated int, err error)
 }
 
@@ -29,13 +32,23 @@ type Config struct {
 	Logger   *slog.Logger
 }
 
-// maxBody is the largest request body: a key file of some thousands of cards.
-const maxBody = 16 << 20
+const (
+	// maxImportBody bounds a key file, of some thousands of cards.
+	maxImportBody = 16 << 20
+	// maxBody bounds the other request bodies.
+	maxBody = 64 << 10
+
+	defaultPerPage = 25
+	maxPerPage     = 100
+)
 
 func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 
+	mux.Handle("GET /api/v1/livez", Livez())
+	mux.Handle("GET /api/v1/readyz", Readyz())
 	mux.Handle("GET /api/v1/status", GetStatus(cfg))
+	mux.Handle("GET /api/v1/openapi.yaml", OpenAPISpec())
 	mux.Handle("GET /api/v1/cards", ListCards(cfg))
 	mux.Handle("POST /api/v1/cards", CreateCard(cfg))
 	mux.Handle("POST /api/v1/cards/import", ImportCards(cfg))
@@ -47,7 +60,32 @@ func NewHandler(cfg Config) http.Handler {
 		mux.Handle("GET /", Frontend(cfg.Frontend))
 	}
 
-	return http.MaxBytesHandler(mux, maxBody)
+	return mux
+}
+
+// Livez tells the kubelet that the process serves HTTP.
+func Livez() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+// Readyz tells whether simota can serve requests. It has no dependency to wait for once it listens.
+func Readyz() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+//go:embed openapi.yaml
+var openapiSpec []byte
+
+func OpenAPISpec() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/openapi+yaml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(openapiSpec)
+	})
 }
 
 type Status struct {
@@ -66,6 +104,56 @@ type Response struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// SuccessResponse is the response to a change that returns nothing else.
+type SuccessResponse struct {
+	Message string `json:"message"`
+}
+
+// decodeBody decodes a JSON request body into v, refusing unknown fields, and answers 400 when it cannot.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any, cfg Config) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request data", err, cfg.Logger)
+		return false
+	}
+
+	return true
+}
+
+func pagination(w http.ResponseWriter, r *http.Request, cfg Config) (int, int, bool) {
+	q := r.URL.Query()
+
+	page, ok := atoiDefault(q.Get("page"), 1)
+	if !ok || page < 1 {
+		writeError(w, http.StatusBadRequest, "page must be an integer >= 1", nil, cfg.Logger)
+		return 0, 0, false
+	}
+
+	perPage, ok := atoiDefault(q.Get("per_page"), defaultPerPage)
+	if !ok || perPage < 1 || perPage > maxPerPage {
+		writeError(w, http.StatusBadRequest, "per_page must be an integer between 1 and 100", nil, cfg.Logger)
+		return 0, 0, false
+	}
+
+	return page, perPage, true
+}
+
+func atoiDefault(s string, def int) (int, bool) {
+	if s == "" {
+		return def, true
+	}
+
+	n, err := strconv.Atoi(s)
+
+	return n, err == nil
+}
+
+func formatTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 }
 
 func writeResponse(w http.ResponseWriter, v any, status int, logger *slog.Logger) {

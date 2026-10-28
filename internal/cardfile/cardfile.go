@@ -83,6 +83,7 @@ func Parse(r io.Reader) ([]Card, error) {
 
 	for n, row := range rows[1:] {
 		line := n + 2
+
 		if len(row) == 1 && strings.TrimSpace(row[0]) == "" {
 			continue
 		}

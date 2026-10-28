@@ -280,7 +280,7 @@ export function EditCardDialog({
 
   return (
     <EditDialog
-      title={`Edit Card ${card.iccid}`}
+      title="Edit Card"
       valid={profileValid(profile)}
       pending={mutation.isPending}
       error={mutation.error}
@@ -288,6 +288,7 @@ export function EditCardDialog({
       onClose={onClose}
       failure="Could not update the card"
     >
+      <TextField label="ICCID" value={card.iccid} disabled />
       <ProfileFields
         profile={profile}
         onChange={(change) => setProfile((p) => ({ ...p, ...change }))}

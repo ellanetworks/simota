@@ -1,19 +1,11 @@
 import { useState } from "react";
+import { Box, Button, IconButton, Stack, Tooltip } from "@mui/material";
+import { Delete as DeleteIcon, Edit as EditIcon } from "@mui/icons-material";
 import {
-  Box,
-  Button,
-  IconButton,
-  Skeleton,
-  Stack,
-  Tooltip,
-} from "@mui/material";
-import {
-  Add as AddIcon,
-  Delete as DeleteIcon,
-  Edit as EditIcon,
-  UploadFile as UploadFileIcon,
-} from "@mui/icons-material";
-import { DataGrid, type GridColDef } from "@mui/x-data-grid";
+  DataGrid,
+  type GridColDef,
+  type GridPaginationModel,
+} from "@mui/x-data-grid";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AddCardDialog, EditCardDialog } from "@/components/CardDialogs";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -24,6 +16,8 @@ import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import { type Card, deleteCard, listCards } from "@/queries/cards";
 import { formatTimestamp } from "@/utils/dates";
 import { GRID_SX } from "@/utils/layout";
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 const dash = (value: string) => value || "—";
 
@@ -53,7 +47,6 @@ const columns = (
     field: "key_sets",
     headerName: "Key sets",
     width: 100,
-    sortable: false,
     valueGetter: (_value, row) =>
       dash(row.key_sets.map((k) => k.version).join(", ")),
   },
@@ -69,7 +62,6 @@ const columns = (
     width: 100,
     align: "right",
     headerAlign: "right",
-    sortable: false,
     renderCell: ({ row }) => (
       <>
         <Tooltip title="Edit card" arrow>
@@ -103,7 +95,18 @@ export default function Cards() {
   const [editing, setEditing] = useState<Card | null>(null);
   const [deleting, setDeleting] = useState<Card | null>(null);
 
-  const cards = useQuery({ queryKey: ["cards"], queryFn: listCards });
+  const [pagination, setPagination] = useState<GridPaginationModel>({
+    page: 0,
+    pageSize: PAGE_SIZE_OPTIONS[0],
+  });
+
+  const cards = useQuery({
+    queryKey: ["cards", pagination],
+    queryFn: () =>
+      listCards({ page: pagination.page + 1, perPage: pagination.pageSize }),
+    placeholderData: (prev) => prev,
+  });
+  const { data, isFetching } = cards;
 
   const remove = useMutation({
     mutationFn: (card: Card) => deleteCard(card.iccid),
@@ -123,21 +126,16 @@ export default function Cards() {
       <PageHeader
         id="cards-title"
         title="Cards"
-        count={cards.data?.length}
+        count={data?.total_count}
         description="The SIM cards this platform manages over the air, and their OTA keys."
         action={
           <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
-            <Button
-              variant="outlined"
-              startIcon={<UploadFileIcon />}
-              onClick={() => setImporting(true)}
-            >
+            <Button variant="outlined" onClick={() => setImporting(true)}>
               Import
             </Button>
             <Button
               variant="contained"
               color="success"
-              startIcon={<AddIcon />}
               onClick={() => setAdding(true)}
             >
               Add
@@ -146,26 +144,26 @@ export default function Cards() {
         }
       />
       <QueryAlert query={cards} subject="cards" />
-      {cards.isPending && <Skeleton variant="rounded" height={160} />}
-      {cards.data && (
-        <DataGrid<Card>
-          aria-label="Cards"
-          rows={cards.data}
-          columns={columns(setEditing, setDeleting)}
-          getRowId={(card) => card.iccid}
-          disableColumnFilter
-          disableColumnMenu
-          disableRowSelectionOnClick
-          disableVirtualization
-          pageSizeOptions={[25, 50, 100]}
-          initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
-          localeText={{
-            noRowsLabel: "No cards. Add one, or import a key file.",
-          }}
-          autoHeight
-          sx={GRID_SX}
-        />
-      )}
+      <DataGrid<Card>
+        aria-label="Cards"
+        rows={data?.items ?? []}
+        columns={columns(setEditing, setDeleting)}
+        getRowId={(card) => card.iccid}
+        loading={isFetching && !data}
+        paginationMode="server"
+        rowCount={data?.total_count ?? 0}
+        paginationModel={pagination}
+        onPaginationModelChange={setPagination}
+        pageSizeOptions={PAGE_SIZE_OPTIONS}
+        disableColumnMenu
+        disableColumnSorting
+        disableColumnFilter
+        disableRowSelectionOnClick
+        disableVirtualization
+        autoHeight
+        localeText={{ noRowsLabel: "No cards." }}
+        sx={GRID_SX}
+      />
       {adding && <AddCardDialog onClose={() => setAdding(false)} />}
       {importing && <ImportCardsDialog onClose={() => setImporting(false)} />}
       {editing && (

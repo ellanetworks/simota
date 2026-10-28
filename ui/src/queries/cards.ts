@@ -1,4 +1,9 @@
-import { apiFetch } from "@/queries/utils";
+import {
+  apiFetch,
+  type Page,
+  type PageParams,
+  withQuery,
+} from "@/queries/utils";
 
 export type KeyAlgorithm = "3des" | "aes";
 
@@ -48,8 +53,10 @@ export interface ImportResult {
 
 const cardsPath = "/api/v1/cards";
 
-export const listCards = (): Promise<Card[]> =>
-  apiFetch<{ items: Card[] }>(cardsPath).then((r) => r.items);
+export const listCards = (params: PageParams = {}): Promise<Page<Card>> =>
+  apiFetch<Page<Card>>(
+    withQuery(cardsPath, { page: params.page, per_page: params.perPage }),
+  );
 
 export const createCard = (card: CardParams): Promise<Card> =>
   apiFetch<Card>(cardsPath, { method: "POST", body: card });
@@ -60,8 +67,8 @@ export const updateCard = (iccid: string, card: CardUpdate): Promise<Card> =>
     body: card,
   });
 
-export const deleteCard = (iccid: string): Promise<void> =>
-  apiFetch<void>(`${cardsPath}/${encodeURIComponent(iccid)}`, {
+export const deleteCard = (iccid: string): Promise<{ message: string }> =>
+  apiFetch<{ message: string }>(`${cardsPath}/${encodeURIComponent(iccid)}`, {
     method: "DELETE",
   });
 
