@@ -1,0 +1,40 @@
+name: Kubernetes Smoke Test
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+jobs:
+  k8s-smoke:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      KIND_VERSION: v0.33.0
+      KUBECTL_VERSION: v1.37.1
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kind, kubectl and kubeconform
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bin"
+          cd "${RUNNER_TEMP}/bin"
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar -xz kubeconform
+          chmod +x kind kubectl kubeconform
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: simota-image-amd64
+
+      - name: Load the image
+        run: docker load -i simota_latest-amd64.tar
+
+      - name: Smoke test
+        run: ci/k8s/smoke.sh
+        env:
+          IMAGE: simota:latest
