@@ -26,3 +26,12 @@ jobs:
     uses: ./.github/workflows/ui-typecheck.yaml
   ui-test:
     uses: ./.github/workflows/ui-test.yaml
+  image-build:
+    uses: ./.github/workflows/image-build.yaml
+  image-publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [go-unit-test, go-lint, ui-lint, ui-typecheck, ui-test, image-build]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image-publish.yaml
