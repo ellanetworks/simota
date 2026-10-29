@@ -30,6 +30,10 @@ type CreateJobsParams struct {
 	MCC    string   `json:"mcc"`
 	MNC    string   `json:"mnc"`
 	Access []string `json:"access"`
+	// IMSI is the IMSI an IMSI write writes, and PreviousIMSI the IMSI it replaces, which must be the card's IMSI on
+	// record: the operator states which subscription the card leaves.
+	IMSI         string `json:"imsi"`
+	PreviousIMSI string `json:"previous_imsi"`
 }
 
 type Job struct {
@@ -42,6 +46,10 @@ type Job struct {
 	Access    []string `json:"access,omitempty"`
 	// AccessRaw is the Access Technology Identifier of a set, in hexadecimal.
 	AccessRaw string `json:"access_raw,omitempty"`
+	// IMSI and PreviousIMSI are those of an IMSI write; IMSIReadBack is the IMSI that EF.IMSI read back after it.
+	IMSI         string `json:"imsi,omitempty"`
+	PreviousIMSI string `json:"previous_imsi,omitempty"`
+	IMSIReadBack string `json:"imsi_read_back,omitempty"`
 	// TAR and KVN are those the job's commands use.
 	TAR    string `json:"tar"`
 	KVN    int    `json:"kvn"`
@@ -113,6 +121,12 @@ func CreateJobs(cfg Config) http.Handler {
 			return
 		}
 
+		// An IMSI is a single subscription's: it is written to one card.
+		if template.Operation == db.OperationIMSIWrite && len(p.ICCIDs) != 1 {
+			writeError(w, http.StatusBadRequest, "An IMSI write takes one card", nil, cfg.Logger)
+			return
+		}
+
 		batch := make([]db.Job, 0, len(p.ICCIDs))
 		seen := map[string]bool{}
 
@@ -140,6 +154,13 @@ func CreateJobs(cfg Config) http.Handler {
 				return
 			}
 
+			if template.Operation == db.OperationIMSIWrite && c.IMSI == "" {
+				writeError(w, http.StatusConflict, fmt.Sprintf("Card %s has no IMSI on record: set the IMSI it holds first",
+					iccid), nil, cfg.Logger)
+
+				return
+			}
+
 			j := template
 			j.ICCID = iccid
 			batch = append(batch, j)
@@ -148,6 +169,11 @@ func CreateJobs(cfg Config) http.Handler {
 		ids, err := cfg.Store.CreateJobs(r.Context(), batch)
 		if errors.Is(err, db.ErrBusy) {
 			writeError(w, http.StatusConflict, "A card has a job in progress", err, cfg.Logger)
+			return
+		}
+
+		if errors.Is(err, db.ErrIMSIMismatch) {
+			writeError(w, http.StatusConflict, "previous_imsi is not the card's IMSI on record", err, cfg.Logger)
 			return
 		}
 
@@ -183,7 +209,7 @@ func ListJobs(cfg Config) http.Handler {
 			return
 		}
 
-		list, total, err := cfg.Store.ListJobs(r.Context(), r.URL.Query().Get("iccid"), page, perPage)
+		list, total, err := cfg.Store.ListJobs(r.Context(), r.URL.Query().Get("search"), page, perPage)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to list jobs", err, cfg.Logger)
 			return
@@ -224,11 +250,27 @@ func GetJob(cfg Config) http.Handler {
 func (p CreateJobsParams) job() (db.Job, error) {
 	j := db.Job{Operation: db.Operation(p.Operation)}
 
+	if j.Operation != db.OperationIMSIWrite && (p.IMSI != "" || p.PreviousIMSI != "") {
+		return db.Job{}, errors.New("only an IMSI write takes imsi and previous_imsi")
+	}
+
 	switch j.Operation {
 	case db.OperationOPLMNRead:
 		if p.Slot != 0 || p.MCC != "" || p.MNC != "" || len(p.Access) > 0 {
 			return db.Job{}, errors.New("a read takes no slot, mcc, mnc or access")
 		}
+
+		return j, nil
+	case db.OperationIMSIWrite:
+		if p.Slot != 0 || p.MCC != "" || p.MNC != "" || len(p.Access) > 0 {
+			return db.Job{}, errors.New("an IMSI write takes no slot, mcc, mnc or access")
+		}
+
+		if !rfm.ValidIMSI(p.IMSI) || !rfm.ValidIMSI(p.PreviousIMSI) {
+			return db.Job{}, errors.New("imsi and previous_imsi must be 6 to 15 digits")
+		}
+
+		j.IMSI, j.PreviousIMSI = p.IMSI, p.PreviousIMSI
 
 		return j, nil
 	case db.OperationOPLMNClear:
@@ -247,7 +289,7 @@ func (p CreateJobsParams) job() (db.Job, error) {
 
 		j.MCC, j.MNC, j.Access = p.MCC, p.MNC, int(access)
 	default:
-		return db.Job{}, errors.New("operation must be oplmn_read, oplmn_set or oplmn_clear")
+		return db.Job{}, errors.New("operation must be oplmn_read, oplmn_set, oplmn_clear or imsi_write")
 	}
 
 	if p.Slot < 1 || p.Slot > jobs.MaxSlot {
@@ -262,7 +304,7 @@ func (p CreateJobsParams) job() (db.Job, error) {
 func jobResponse(j db.Job) Job {
 	out := Job{
 		ID: j.ID, ICCID: j.ICCID, Operation: string(j.Operation), Slot: j.Slot, MCC: j.MCC, MNC: j.MNC,
-		TAR: hex.EncodeToString(j.TAR), KVN: j.KVN, Status: string(j.Status), Step: j.Step, Counter: j.Counter,
+		IMSI: j.IMSI, PreviousIMSI: j.PreviousIMSI, TAR: hex.EncodeToString(j.TAR), KVN: j.KVN, Status: string(j.Status), Step: j.Step, Counter: j.Counter,
 		MessageID: j.MessageID, Warning: j.Warning, Command: hex.EncodeToString(j.Command),
 		Response: hex.EncodeToString(j.Response), Error: j.Error, CreatedAt: formatTime(j.CreatedAt),
 		UpdatedAt: formatTime(j.UpdatedAt),
@@ -286,7 +328,11 @@ func jobResponse(j db.Job) Job {
 		out.StatusWord = fmt.Sprintf("%04x", j.StatusWord)
 	}
 
-	if j.Status == db.JobSucceeded || j.Status == db.JobUnconfirmed {
+	switch {
+	case j.Operation == db.OperationIMSIWrite:
+		// A read-back that differs from the IMSI written is shown too: it is what the card holds.
+		out.IMSIReadBack, _ = rfm.DecodeIMSI(j.Data)
+	case j.Status == db.JobSucceeded || j.Status == db.JobUnconfirmed:
 		out.Entries = entriesOf(j)
 	}
 

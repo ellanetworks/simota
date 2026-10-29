@@ -12,7 +12,8 @@ import (
 // Card is a SIM card, the MSISDN it is reached at, and the TAR and key set that OTA commands to it use.
 type Card struct {
 	ICCID string
-	// IMSI is informational, empty when unknown: OTA reaches the card by its MSISDN.
+	// IMSI is the IMSI on record, empty when unknown: as the operator or an import set it, or as the last IMSI write
+	// that succeeded wrote it. OTA reaches the card by its MSISDN.
 	IMSI        string
 	MSISDN      string
 	Description string

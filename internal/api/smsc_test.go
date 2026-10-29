@@ -115,7 +115,7 @@ func TestSMSC(t *testing.T) {
 	// GET shows the bind state.
 	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	e.gateway.state = gateway.State{
-		Status: gateway.StatusDisconnected, Since: at, LastError: "smpp: bind refused: smpp: bind_transceiver_resp ESME_RBINDFAIL",
+		Status: gateway.StatusDisconnected, Since: at, LastError: "Bind refused: ESME_RBINDFAIL",
 		LastErrorAt: at,
 	}
 

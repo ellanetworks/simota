@@ -14,7 +14,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AddCardDialog,
   EditCardDialog,
-  keySetLabel,
+  algorithmLabel,
 } from "@/components/CardDialogs";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import ImportCardsDialog from "@/components/ImportCardsDialog";
@@ -24,19 +24,14 @@ import QueryAlert from "@/components/QueryAlert";
 import { errorMessage, useSnackbar } from "@/contexts/SnackbarContext";
 import { type Card, deleteCard, listCards } from "@/queries/cards";
 import { smscQuery } from "@/queries/smsc";
-import { formatTimestamp } from "@/utils/dates";
 import { GRID_SX } from "@/utils/layout";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 const dash = (value: string) => value || "—";
 
-// hiddenByDefault are the columns the column menu shows on demand, as smsc's Messages page does, so that the grid
-// fits the page.
-const hiddenByDefault = {
-  imsi: false,
-  updated_at: false,
-};
+// WRAP is the class of the cells whose text wraps rather than being cut: the rows grow to fit it.
+const WRAP = "wrap";
 
 // newJobBlock is why a job cannot be created for a card, if it cannot.
 const newJobBlock = (card: Card, smscUnset: boolean): string | undefined => {
@@ -52,7 +47,7 @@ const columns = (
   onEdit: (card: Card) => void,
   onDelete: (card: Card) => void,
 ): GridColDef<Card>[] => [
-  { field: "iccid", headerName: "ICCID", flex: 1, minWidth: 180 },
+  { field: "iccid", headerName: "ICCID", flex: 1, minWidth: 200 },
   {
     field: "imsi",
     headerName: "IMSI",
@@ -72,34 +67,19 @@ const columns = (
     headerName: "Description",
     flex: 1,
     minWidth: 110,
+    cellClassName: WRAP,
     valueGetter: (_value, row) => dash(row.description),
   },
   { field: "tar", headerName: "TAR", width: 80 },
   {
-    field: "key_sets",
-    headerName: "Key sets",
-    flex: 1,
-    minWidth: 190,
-    // A key set to a line, as smsc lists a peer's routes.
-    renderCell: ({ row }) =>
-      row.key_sets.length === 0 ? (
-        "—"
-      ) : (
-        <Stack>
-          {row.key_sets.map((k) => (
-            <span key={k.version}>
-              {keySetLabel(k)}
-              {k.version === row.kvn && " · in use"}
-            </span>
-          ))}
-        </Stack>
-      ),
-  },
-  {
-    field: "updated_at",
-    headerName: "Updated",
-    width: 170,
-    valueFormatter: (value: string) => formatTimestamp(value),
+    // The key set that OTA commands use; the Edit dialog lists them all, with their counters.
+    field: "kvn",
+    headerName: "Key set",
+    width: 110,
+    valueGetter: (_value, row) => {
+      const k = row.key_sets.find((s) => s.version === row.kvn);
+      return k ? `${k.version} (${algorithmLabel(k.algorithm)})` : "—";
+    },
   },
   {
     field: "actions",
@@ -212,6 +192,7 @@ export default function Cards() {
       <QueryAlert query={cards} subject="cards" />
       <DataGrid<Card>
         aria-label="Cards"
+        density="compact"
         rows={data?.items ?? []}
         columns={columns(smscUnset, setNewJob, setEditing, setDeleting)}
         getRowId={(card) => card.iccid}
@@ -222,7 +203,6 @@ export default function Cards() {
         onPaginationModelChange={setPagination}
         pageSizeOptions={PAGE_SIZE_OPTIONS}
         disableColumnMenu
-        initialState={{ columns: { columnVisibilityModel: hiddenByDefault } }}
         disableColumnSorting
         disableColumnFilter
         disableRowSelectionOnClick
@@ -236,6 +216,7 @@ export default function Cards() {
             ...GRID_SX["& .MuiDataGrid-cell"],
             py: 1,
           },
+          [`& .${WRAP}`]: { whiteSpace: "normal", overflowWrap: "anywhere" },
         }}
       />
       {adding && <AddCardDialog onClose={() => setAdding(false)} />}

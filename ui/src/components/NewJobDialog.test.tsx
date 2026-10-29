@@ -11,6 +11,7 @@ const spare = card({
   description: "",
 });
 const blank = card({ iccid: "8949440000001659224", msisdn: "" });
+const unknown = card({ iccid: "8949440000001659232", imsi: undefined });
 
 type Call = { path: string; body: unknown };
 
@@ -31,7 +32,9 @@ const serve = (
       stubApi({
         "/api/v1/cards": (url) => {
           cardLists.push(url);
-          return json(200, { result: page(url, [lab, spare, blank]) });
+          return json(200, {
+            result: page(url, [lab, spare, blank, unknown]),
+          });
         },
         "/api/v1/jobs": (url, init) => {
           const body = JSON.parse(String(init?.body));
@@ -81,8 +84,9 @@ const type = (dialog: HTMLElement, name: RegExp, value: string) =>
     target: { value },
   });
 
+// create is the dialog's submit button, which an IMSI write names as it.
 const create = (dialog: HTMLElement) =>
-  within(dialog).getByRole("button", { name: "Create" });
+  within(dialog).getByRole("button", { name: /^(Create|Write IMSI)$/ });
 
 describe("NewJobDialog", () => {
   it("offers the first 100 cards, and disables those without an MSISDN", async () => {
@@ -289,6 +293,97 @@ describe("NewJobDialog", () => {
     expect(create(dialog)).toBeDisabled();
     type(dialog, /^Slot/, "1");
     expect(create(dialog)).toBeEnabled();
+  });
+
+  it("writes an IMSI, in place of the one on record", async () => {
+    const { calls } = serve();
+    const { dialog, onClose } = await open([lab.iccid]);
+
+    choose(dialog, /^Operation/, "Write IMSI");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "A wrong IMSI cuts the card off the network, and so off OTA: it cannot be undone over the air.",
+    );
+    expect(create(dialog)).toHaveTextContent("Write IMSI");
+    expect(
+      within(dialog).queryByRole("textbox", { name: /^Slot/ }),
+    ).not.toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
+    type(dialog, /^Current IMSI/, "001010000000001");
+    expect(create(dialog)).toBeDisabled();
+    type(dialog, /^New IMSI/, "001010000000002");
+    fireEvent.click(create(dialog));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(calls[0].body).toEqual({
+      iccids: [lab.iccid],
+      operation: "imsi_write",
+      imsi: "001010000000002",
+      previous_imsi: "001010000000001",
+    });
+  });
+
+  it("writes an IMSI to one card only", async () => {
+    serve();
+    const { dialog } = await open([lab.iccid, spare.iccid]);
+
+    choose(dialog, /^Operation/, "Write IMSI");
+    type(dialog, /^Current IMSI/, "001010000000001");
+    type(dialog, /^New IMSI/, "001010000000002");
+    expect(
+      within(dialog).getByText("An IMSI write takes one card."),
+    ).toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
+  });
+
+  it("asks for the IMSI on record of a card without one", async () => {
+    serve();
+    const { dialog } = await open([unknown.iccid]);
+
+    choose(dialog, /^Operation/, "Write IMSI");
+    type(dialog, /^Current IMSI/, "001010000000001");
+    type(dialog, /^New IMSI/, "001010000000002");
+    expect(
+      within(dialog).getByText(
+        "The card has no IMSI on record: edit the card to set the IMSI it holds.",
+      ),
+    ).toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
+  });
+
+  it("tells a current IMSI that is not the card's on record", async () => {
+    serve();
+    const { dialog } = await open([lab.iccid]);
+
+    choose(dialog, /^Operation/, "Write IMSI");
+    type(dialog, /^New IMSI/, "001010000000002");
+    // Not until it is as long as the IMSI on record.
+    type(dialog, /^Current IMSI/, "00101000");
+    expect(
+      within(dialog).queryByText("Not the card's IMSI on record."),
+    ).not.toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
+    type(dialog, /^Current IMSI/, "001010000000009");
+    expect(
+      within(dialog).getByText("Not the card's IMSI on record."),
+    ).toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
+  });
+
+  it.each([
+    ["a new IMSI of 5 digits", /^New IMSI/, "00101"],
+    ["a new IMSI of 16 digits", /^New IMSI/, "0010100000000021"],
+    ["a current IMSI with a letter", /^Current IMSI/, "00101000000000a"],
+  ])("disables Create for %s", async (_name, field, value) => {
+    serve();
+    const { dialog } = await open([lab.iccid]);
+
+    choose(dialog, /^Operation/, "Write IMSI");
+    type(dialog, /^Current IMSI/, "001010000000001");
+    type(dialog, /^New IMSI/, "001010000000002");
+    expect(create(dialog)).toBeEnabled();
+    type(dialog, field, value);
+    expect(within(dialog).getByText("6 to 15 digits.")).toBeInTheDocument();
+    expect(create(dialog)).toBeDisabled();
   });
 
   it.each([

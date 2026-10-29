@@ -116,7 +116,7 @@ describe("SMSC", () => {
       Password: "Not set",
       Originator: "Not set",
       Validity: "1d",
-      Bind: "unset",
+      Bind: "Not set",
       "Last error": "None",
     });
   });
@@ -134,7 +134,7 @@ describe("SMSC", () => {
       Password: "Set",
       Originator: "+15550000000",
       Validity: "1d",
-      Bind: `boundsince ${formatDateTime(SINCE)}`,
+      Bind: `Boundsince ${formatDateTime(SINCE)}`,
       "Last error": "None",
     });
     // No banner: the bind state is in the table.
@@ -160,16 +160,15 @@ describe("SMSC", () => {
       bind: {
         status: "disconnected",
         since: SINCE,
-        last_error:
-          "smpp: bind refused: smpp: bind_transceiver_resp ESME_RBINDFAIL",
+        last_error: "Bind refused: ESME_RBINDFAIL",
         last_error_at: SINCE,
       },
     });
     renderWithClient(<SMSC />);
 
-    await screen.findByText("disconnected");
+    await screen.findByText("Disconnected");
     expect(settings()["Last error"]).toBe(
-      `smpp: bind refused: smpp: bind_transceiver_resp ESME_RBINDFAIL (${formatDateTime(SINCE)})`,
+      `Bind refused: ESME_RBINDFAIL (${formatDateTime(SINCE)})`,
     );
   });
 
@@ -212,7 +211,7 @@ describe("SMSC", () => {
       Password: "Set",
       Validity: "90m",
     });
-    expect(settings().Bind).toContain("connecting");
+    expect(settings().Bind).toContain("Connecting");
     expect(document.body).not.toHaveTextContent(PASSWORD);
   });
 

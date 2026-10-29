@@ -24,7 +24,13 @@ import QueryAlert from "@/components/QueryAlert";
 import { JobStatusChip } from "@/components/chips";
 import { getJob, type Job } from "@/queries/jobs";
 import { formatTimestamp } from "@/utils/dates";
-import { accessLabel, inProgress, jobLabel, plmnLabel } from "@/utils/jobs";
+import {
+  accessLabel,
+  inProgress,
+  jobLabel,
+  plmnLabel,
+  porDetail,
+} from "@/utils/jobs";
 import { TABLE_CONTAINER_SX } from "@/utils/layout";
 
 export const DETAIL_REFRESH_MS = 5000;
@@ -90,6 +96,28 @@ function Entries({ job }: { job: Job }) {
   );
 }
 
+// IMSIReadBack is the IMSI that an IMSI write read back: what the card holds, even when it is not the IMSI written.
+function IMSIReadBack({ job }: { job: Job }) {
+  return (
+    <Box component="section" aria-labelledby="read-back-title">
+      <Typography
+        id="read-back-title"
+        variant="subtitle1"
+        component="h3"
+        sx={{ mb: 1 }}
+      >
+        IMSI read back
+      </Typography>
+      <Typography
+        color={job.imsi_read_back ? undefined : "text.secondary"}
+        sx={job.imsi_read_back ? { fontFamily: "monospace" } : undefined}
+      >
+        {job.imsi_read_back ?? "Not read."}
+      </Typography>
+    </Box>
+  );
+}
+
 // Packets shows the command sent to the card and its answer only when asked to, as smsc shows a message's content.
 function Packets({ job }: { job: Job }) {
   const [shown, setShown] = useState(false);
@@ -146,12 +174,16 @@ function JobDetail({
   if (job.operation === "oplmn_set") {
     rows.push(["Access technologies", accessLabel(job.access, job.access_raw)]);
   }
+  if (job.operation === "imsi_write") {
+    rows.push(["Replaced IMSI", dash(job.previous_imsi)]);
+  }
   rows.push(
     ["TAR", dash(job.tar)],
     ["Key set", dash(job.kvn)],
     ["Created", formatTimestamp(job.created_at)],
     ["Updated", formatTimestamp(job.updated_at)],
-    ["Step", dash(job.step)],
+    // The step counts the job's commands from 1.
+    ["Step", job.step === undefined ? "—" : job.step + 1],
     ["Counter", dash(job.counter)],
   );
   if (job.operation === "oplmn_read") {
@@ -159,7 +191,7 @@ function JobDetail({
   }
   rows.push(
     ["SMSC message", dash(job.message_id)],
-    ["PoR status", dash(job.por_status)],
+    ["PoR", porDetail(job.por_status)],
     [
       "Status word",
       job.status_word && job.warning ? (
@@ -216,7 +248,11 @@ function JobDetail({
           )}
         <Fields rows={rows} />
         <Divider />
-        <Entries job={job} />
+        {job.operation === "imsi_write" ? (
+          <IMSIReadBack job={job} />
+        ) : (
+          <Entries job={job} />
+        )}
         <Divider />
         <Packets job={job} />
       </Stack>

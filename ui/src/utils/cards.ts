@@ -5,7 +5,7 @@ import { isE164 } from "@/utils/e164";
 export const isICCID = (value: string): boolean =>
   /^\d{18,20}[Ff]?$/.test(value);
 
-// isIMSI accepts an IMSI of 6 to 15 digits, or none: it is informational.
+// isIMSI accepts an IMSI of 6 to 15 digits, or none: a card's IMSI on record is optional.
 export const isIMSI = (value: string): boolean =>
   value === "" || /^\d{6,15}$/.test(value);
 

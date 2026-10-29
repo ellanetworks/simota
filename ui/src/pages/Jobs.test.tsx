@@ -86,11 +86,11 @@ const serve = (
             return json(201, { result: { items: [job({ id: 9 })] } });
           }
           lists.push(url);
-          const iccid = url.searchParams.get("iccid");
+          const search = url.searchParams.get("search");
           return json(200, {
             result: page(
               url,
-              iccid ? jobs.filter((j) => j.iccid === iccid) : jobs,
+              search ? jobs.filter((j) => j.iccid.includes(search)) : jobs,
             ),
           });
         },
@@ -148,27 +148,27 @@ describe("Jobs", () => {
       "2026-10-28 17:34:53",
       "8949440000001659208",
       "Read roaming list",
-      "succeeded",
-      "por_ok",
+      "Succeeded",
+      "OK",
       "2026-10-28 17:34:54",
     ]);
     expect(rowCells(2).slice(2, 5)).toEqual([
       "Set slot 2 to 999/99 (E-UTRAN WB-S1, E-UTRAN NB-S1, NG-RAN)",
-      "sent",
+      "Sent",
       "—",
     ]);
-    expect(rowCells(1).slice(2, 4)).toEqual(["Clear slot 2", "failed"]);
+    expect(rowCells(1).slice(2, 4)).toEqual(["Clear slot 2", "Failed"]);
     expect(
-      within(row(3)).getByText("succeeded").closest(".MuiChip-root"),
+      within(row(3)).getByText("Succeeded").closest(".MuiChip-root"),
     ).toHaveClass("MuiChip-colorSuccess");
     expect(
-      within(row(2)).getByText("sent").closest(".MuiChip-root"),
+      within(row(2)).getByText("Sent").closest(".MuiChip-root"),
     ).toHaveClass("MuiChip-colorInfo");
     expect(
-      within(row(1)).getByText("failed").closest(".MuiChip-root"),
+      within(row(1)).getByText("Failed").closest(".MuiChip-root"),
     ).toHaveClass("MuiChip-colorError");
     expect(
-      within(row(4)).getByText("unconfirmed").closest(".MuiChip-root"),
+      within(row(4)).getByText("Unconfirmed").closest(".MuiChip-root"),
     ).toHaveClass("MuiChip-colorWarning");
   });
 
@@ -177,7 +177,7 @@ describe("Jobs", () => {
     renderWithClient(<Jobs />);
     await screen.findByText("Read roaming list");
 
-    fireEvent.mouseOver(within(row(3)).getByText("succeeded"));
+    fireEvent.mouseOver(within(row(3)).getByText("Succeeded"));
 
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Succeeded: written on the card; the phone uses it after its next USIM initialisation or REFRESH.",
@@ -203,25 +203,27 @@ describe("Jobs", () => {
     ]);
   });
 
-  it("filters by card", async () => {
+  it("searches the jobs as the operator types", async () => {
     const other = job({ id: 5, iccid: "8949440000001659216" });
     const lists = serve([other, read]);
     renderWithClient(<Jobs />);
     await screen.findByText("1–2 of 2");
 
-    const filter = screen.getByRole("textbox", { name: "Card" });
-    fireEvent.change(filter, { target: { value: "89494400" } });
-    expect(
-      screen.getByText("An ICCID, of 18 to 20 digits."),
-    ).toBeInTheDocument();
-
-    fireEvent.change(filter, { target: { value: other.iccid } });
+    // Part of an ICCID is a search, not an error.
+    fireEvent.change(screen.getByRole("textbox", { name: "Search" }), {
+      target: { value: "9216" },
+    });
     expect(await screen.findByText("1–1 of 1")).toBeInTheDocument();
     expect(row(5)).not.toBeNull();
-    expect(lists.map((u) => u.searchParams.get("iccid"))).toEqual([
+    expect(lists.map((u) => u.searchParams.get("search"))).toEqual([
       null,
-      other.iccid,
+      "9216",
     ]);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Search" }), {
+      target: { value: "0000" + "7777" },
+    });
+    expect(await screen.findByText("No jobs match.")).toBeInTheDocument();
   });
 
   it("shows what the card read in the drawer", async () => {
@@ -239,11 +241,11 @@ describe("Jobs", () => {
       "Key set": "1",
       Created: "2026-10-28 17:34:53",
       Updated: "2026-10-28 17:34:54",
-      Step: "2",
+      Step: "3",
       Counter: "7",
       "File size": "30",
       "SMSC message": "42",
-      "PoR status": "por_ok",
+      PoR: "OK (00)",
       "Status word": "9000",
     });
     const entries = within(drawer).getByRole("table", {
@@ -290,7 +292,7 @@ describe("Jobs", () => {
     );
     expect(fields(drawer)).toMatchObject({
       "SMSC message": "—",
-      "PoR status": "por_ok",
+      PoR: "OK (00)",
       "Status word": "6a82",
     });
     expect(within(drawer).getByText("Slot read back")).toBeInTheDocument();
@@ -318,10 +320,10 @@ describe("Jobs", () => {
       "Key set": "2",
       Created: "2026-10-28 17:34:53",
       Updated: "2026-10-28 17:34:54",
-      Step: "1",
+      Step: "2",
       Counter: "9",
       "SMSC message": "43",
-      "PoR status": "por_ok",
+      PoR: "OK (00)",
       "Status word": "6310 (warning)",
     });
     const entries = within(drawer).getByRole("table", {
@@ -337,6 +339,36 @@ describe("Jobs", () => {
       ["Slot", "PLMN", "Access technologies"],
       ["3", "001/01", "NG-RAN (1000)"],
     ]);
+  });
+
+  it("shows an IMSI write and the IMSI read back", async () => {
+    const write = job({
+      id: 5,
+      operation: "imsi_write",
+      imsi: "001010000000002",
+      previous_imsi: "001010000000001",
+      imsi_read_back: "001010000000002",
+      status: "succeeded",
+      por_status: "por_ok",
+      status_word: "9000",
+    });
+    serve([write]);
+    renderWithClient(<Jobs />);
+    const label = "Write IMSI 001010000000002";
+    await screen.findByText(label);
+
+    fireEvent.click(within(row(5)).getByText(label));
+
+    const drawer = screen.getByRole("complementary", { name: "Job 5" });
+    expect(fields(drawer)).toMatchObject({
+      Operation: label,
+      "Replaced IMSI": "001010000000001",
+    });
+    expect(
+      within(drawer).getByRole("heading", { name: "IMSI read back" }),
+    ).toBeInTheDocument();
+    expect(within(drawer).getByText("001010000000002")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("table")).not.toBeInTheDocument();
   });
 
   it("disables New Job until the SMSC is set", async () => {

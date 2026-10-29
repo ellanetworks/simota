@@ -3,7 +3,6 @@ package gateway_test
 import (
 	"context"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,7 +121,7 @@ func TestGateway(t *testing.T) {
 
 	waitFor(t, "a refused bind", func() bool { return g.State().LastError != "" })
 
-	if st := g.State(); st.Status == gateway.StatusBound || !strings.Contains(st.LastError, "ESME_RBINDFAIL") {
+	if st := g.State(); st.Status == gateway.StatusBound || st.LastError != "Bind refused: ESME_RBINDFAIL" {
 		t.Fatalf("refused state %+v", st)
 	}
 

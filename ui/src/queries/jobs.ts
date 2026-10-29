@@ -5,8 +5,10 @@ import {
   withQuery,
 } from "@/queries/utils";
 
-// JobOperation is what a job does to a card's EF.OPLMNwAcT, its operator-controlled roaming list.
-export type JobOperation = "oplmn_read" | "oplmn_set" | "oplmn_clear";
+// JobOperation is what a job does to a card's USIM: to its EF.OPLMNwAcT, the operator-controlled roaming list, or to
+// its EF.IMSI.
+export type JobOperation =
+  "oplmn_read" | "oplmn_set" | "oplmn_clear" | "imsi_write";
 
 export type JobStatus =
   "queued" | "sent" | "succeeded" | "unconfirmed" | "failed";
@@ -46,6 +48,11 @@ export interface Job {
   mnc?: string;
   access?: AccessTechnology[];
   access_raw?: string;
+  // imsi is the IMSI an IMSI write writes, previous_imsi the card's IMSI on record it replaces, and imsi_read_back the
+  // IMSI that EF.IMSI read back after it.
+  imsi?: string;
+  previous_imsi?: string;
+  imsi_read_back?: string;
   // tar and kvn are the TAR and key set version the job's commands use.
   tar?: string;
   kvn?: number;
@@ -82,10 +89,16 @@ export type JobParams = { iccids: string[] } & (
       mnc: string;
       access: AccessTechnology[];
     }
+  | {
+      operation: "imsi_write";
+      imsi: string;
+      previous_imsi: string;
+    }
 );
 
 export interface ListJobsParams extends PageParams {
-  iccid?: string;
+  // search is part of a card's ICCID, IMSI or MSISDN.
+  search?: string;
 }
 
 const jobsPath = "/api/v1/jobs";
@@ -93,7 +106,7 @@ const jobsPath = "/api/v1/jobs";
 export const listJobs = (params: ListJobsParams = {}): Promise<Page<Job>> =>
   apiFetch<Page<Job>>(
     withQuery(jobsPath, {
-      iccid: params.iccid,
+      search: params.search,
       page: params.page,
       per_page: params.perPage,
     }),

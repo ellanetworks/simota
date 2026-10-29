@@ -30,7 +30,8 @@ type DB struct {
 
 // migrations are the schema's versions; the first is the schema. A job's por_missing marks it closed without the PoR to
 // its last command, by a receipt or the deadline, which a later PoR of that command's TAR and counter still decides;
-// its attempts count the failed submits of its current command.
+// its attempts count the failed submits of its current command. An IMSI write keeps the IMSI it writes and the card's
+// IMSI on record that it replaces.
 var migrations = []string{
 	`CREATE TABLE cards (
 		iccid TEXT PRIMARY KEY,
@@ -56,11 +57,13 @@ var migrations = []string{
 	CREATE TABLE jobs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		iccid TEXT NOT NULL REFERENCES cards (iccid) ON DELETE CASCADE,
-		operation TEXT NOT NULL CHECK (operation IN ('oplmn_read', 'oplmn_set', 'oplmn_clear')),
+		operation TEXT NOT NULL CHECK (operation IN ('oplmn_read', 'oplmn_set', 'oplmn_clear', 'imsi_write')),
 		slot INTEGER CHECK (slot BETWEEN 1 AND 51),
 		mcc TEXT,
 		mnc TEXT,
 		access INTEGER CHECK (access BETWEEN 0 AND 65535),
+		imsi TEXT,
+		previous_imsi TEXT,
 		tar BLOB NOT NULL CHECK (length(tar) = 3),
 		kvn INTEGER NOT NULL CHECK (kvn BETWEEN 1 AND 15),
 		status TEXT NOT NULL CHECK (status IN ('queued', 'sent', 'succeeded', 'unconfirmed', 'failed')),
@@ -79,8 +82,9 @@ var migrations = []string{
 		attempts INTEGER NOT NULL CHECK (attempts >= 0),
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
-		CHECK (operation = 'oplmn_read' OR slot IS NOT NULL),
+		CHECK (operation NOT IN ('oplmn_set', 'oplmn_clear') OR slot IS NOT NULL),
 		CHECK (operation != 'oplmn_set' OR mcc IS NOT NULL AND mnc IS NOT NULL AND access IS NOT NULL),
+		CHECK (operation != 'imsi_write' OR imsi IS NOT NULL AND previous_imsi IS NOT NULL),
 		CHECK (status != 'sent' OR command IS NOT NULL AND counter IS NOT NULL AND message_id IS NOT NULL)
 	);
 	CREATE INDEX jobs_iccid ON jobs (iccid, id);

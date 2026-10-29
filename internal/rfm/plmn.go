@@ -56,6 +56,14 @@ var AccessNames = []string{
 	GSMCompact, CDMA2000HRPD, CDMA20001xRTT,
 }
 
+// AccessLabels are the access technologies' names as the specification writes them, for people.
+var AccessLabels = map[string]string{
+	UTRAN: "UTRAN", EUTRANWBS1: "E-UTRAN WB-S1", EUTRANNBS1: "E-UTRAN NB-S1", NGRAN: "NG-RAN",
+	SatelliteNGRAN: "Satellite NG-RAN", SatelliteEUTRANWBS1: "Satellite E-UTRAN WB-S1",
+	SatelliteEUTRANNBS1: "Satellite E-UTRAN NB-S1", GSM: "GSM", ECGSMIoT: "EC-GSM-IoT", GSMCompact: "GSM COMPACT",
+	CDMA2000HRPD: "cdma2000 HRPD", CDMA20001xRTT: "cdma2000 1xRTT",
+}
+
 var plainBits = map[string]AccessTechnology{
 	UTRAN: bitUTRAN, NGRAN: bitNGRAN, SatelliteNGRAN: bitSatelliteNGRAN, SatelliteEUTRANWBS1: bitSatelliteEUTRANWB,
 	SatelliteEUTRANNBS1: bitSatelliteEUTRANNB, GSMCompact: bitGSMCompact, CDMA2000HRPD: bitCDMA2000HRPD,

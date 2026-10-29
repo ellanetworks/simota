@@ -12,11 +12,23 @@ const statusColors: Record<JobStatus, ChipProps["color"]> = {
   failed: "error",
 };
 
+const statusLabels: Record<JobStatus, string> = {
+  queued: "Queued",
+  sent: "Sent",
+  succeeded: "Succeeded",
+  unconfirmed: "Unconfirmed",
+  failed: "Failed",
+};
+
 // JobStatusChip is a job's status, with what it means on hover, as smsc's peer state chip.
 export function JobStatusChip({ status }: { status: JobStatus }) {
   return (
     <Tooltip title={statusHelp[status]} arrow>
-      <Chip label={status} color={statusColors[status]} size="small" />
+      <Chip
+        label={statusLabels[status]}
+        color={statusColors[status]}
+        size="small"
+      />
     </Tooltip>
   );
 }
@@ -26,6 +38,13 @@ const bindColors: Record<BindStatus, ChipProps["color"]> = {
   connecting: "info",
   bound: "success",
   disconnected: "error",
+};
+
+const bindLabels: Record<BindStatus, string> = {
+  unset: "Not set",
+  connecting: "Connecting",
+  bound: "Bound",
+  disconnected: "Disconnected",
 };
 
 const bindHelp: Record<BindStatus, string> = {
@@ -39,7 +58,11 @@ const bindHelp: Record<BindStatus, string> = {
 export function BindStatusChip({ status }: { status: BindStatus }) {
   return (
     <Tooltip title={bindHelp[status]} arrow>
-      <Chip label={status} color={bindColors[status]} size="small" />
+      <Chip
+        label={bindLabels[status]}
+        color={bindColors[status]}
+        size="small"
+      />
     </Tooltip>
   );
 }

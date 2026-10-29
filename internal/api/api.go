@@ -26,7 +26,7 @@ type Store interface {
 	ImportCards(ctx context.Context, cards []db.Card) (created, updated int, err error)
 	CreateJobs(ctx context.Context, jobs []db.Job) ([]int64, error)
 	GetJob(ctx context.Context, id int64) (db.Job, error)
-	ListJobs(ctx context.Context, iccid string, page, perPage int) ([]db.Job, int, error)
+	ListJobs(ctx context.Context, search string, page, perPage int) ([]db.Job, int, error)
 	SetCounter(ctx context.Context, iccid string, version int, counter uint64) error
 	GetSMSC(ctx context.Context) (db.SMSC, error)
 	PutSMSC(ctx context.Context, s db.SMSC) error

@@ -11,6 +11,8 @@ import {
   jobLabel,
   MORE_ACCESS_TECHNOLOGIES,
   plmnLabel,
+  porDetail,
+  porLabel,
 } from "@/utils/jobs";
 
 describe("jobLabel", () => {
@@ -28,6 +30,14 @@ describe("jobLabel", () => {
       "Set slot 2 to 999/99 (E-UTRAN WB-S1, E-UTRAN NB-S1, NG-RAN)",
     ],
     [job({ operation: "oplmn_clear", slot: 2 }), "Clear slot 2"],
+    [
+      job({
+        operation: "imsi_write",
+        imsi: "001010000000002",
+        previous_imsi: "001010000000001",
+      }),
+      "Write IMSI 001010000000002",
+    ],
   ])("labels %j as %s", (j, label) => {
     expect(jobLabel(j)).toBe(label);
   });
@@ -70,6 +80,24 @@ describe("plmnLabel", () => {
   it("shows an unused entry as a dash", () => {
     expect(plmnLabel("001", "01")).toBe("001/01");
     expect(plmnLabel(undefined, undefined)).toBe("—");
+  });
+});
+
+describe("porLabel", () => {
+  it.each([
+    ["por_ok", "OK", "OK (00)"],
+    ["counter_low", "Counter too low", "Counter too low (02)"],
+    [
+      "insufficient_security_level",
+      "Security too low",
+      "Security too low (0A)",
+    ],
+    ["proprietary_c1", "Proprietary C1", "Proprietary C1"],
+    ["reserved_0d", "Reserved 0D", "Reserved 0D"],
+    [undefined, "—", "—"],
+  ])("labels %s as %s", (status, label, detail) => {
+    expect(porLabel(status)).toBe(label);
+    expect(porDetail(status)).toBe(detail);
   });
 });
 

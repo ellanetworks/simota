@@ -14,10 +14,9 @@ import { JobStatusChip } from "@/components/chips";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { type Job, listJobs } from "@/queries/jobs";
 import { smscQuery } from "@/queries/smsc";
-import { isICCID } from "@/utils/cards";
 import { formatTimestamp } from "@/utils/dates";
-import { jobLabel } from "@/utils/jobs";
-import { GRID_SX } from "@/utils/layout";
+import { jobLabel, porLabel } from "@/utils/jobs";
+import { DATE_WIDTH, GRID_SX } from "@/utils/layout";
 
 export const JOBS_REFRESH_MS = 5000;
 
@@ -29,39 +28,41 @@ const columns: GridColDef<Job>[] = [
   {
     field: "created_at",
     headerName: "Created",
-    width: 170,
+    width: DATE_WIDTH,
     valueFormatter: (value: string) => formatTimestamp(value),
   },
   { field: "iccid", headerName: "Card", width: 200 },
+  // The text columns of variable length share the spare width, so that none is cut while there is room.
   {
     field: "operation",
     headerName: "Operation",
-    flex: 1,
+    flex: 2,
     minWidth: 220,
     valueGetter: (_value, row) => jobLabel(row),
   },
   {
     field: "status",
     headerName: "Status",
-    width: 120,
+    width: 130,
     renderCell: ({ row }) => <JobStatusChip status={row.status} />,
   },
   {
     field: "por_status",
     headerName: "PoR",
-    width: 140,
-    valueGetter: (_value, row) => row.por_status || "—",
+    flex: 1,
+    minWidth: 170,
+    valueGetter: (_value, row) => porLabel(row.por_status),
   },
   {
     field: "updated_at",
     headerName: "Updated",
-    width: 170,
+    width: DATE_WIDTH,
     valueFormatter: (value: string) => formatTimestamp(value),
   },
 ];
 
 export default function Jobs() {
-  const [iccid, setIccid] = useState("");
+  const [search, setSearch] = useState("");
   const [pagination, setPagination] = useState<GridPaginationModel>({
     page: 0,
     pageSize: PAGE_SIZE_OPTIONS[0],
@@ -70,17 +71,13 @@ export default function Jobs() {
   const closeDrawer = useCallback(() => setSelected(null), []);
   const [creating, setCreating] = useState(false);
 
-  const iccidInvalid = iccid !== "" && !isICCID(iccid);
-  const debouncedIccid = useDebouncedValue(
-    iccidInvalid ? "" : iccid,
-    FILTER_DEBOUNCE_MS,
-  );
+  const debouncedSearch = useDebouncedValue(search, FILTER_DEBOUNCE_MS);
 
   const jobs = useQuery({
-    queryKey: ["jobs", debouncedIccid, pagination],
+    queryKey: ["jobs", debouncedSearch, pagination],
     queryFn: () =>
       listJobs({
-        iccid: debouncedIccid,
+        search: debouncedSearch,
         page: pagination.page + 1,
         perPage: pagination.pageSize,
       }),
@@ -119,24 +116,21 @@ export default function Jobs() {
         sx={{ mb: 2, flexWrap: "wrap" }}
       >
         <TextField
-          label="Card"
+          label="Search"
           size="small"
-          value={iccid}
+          value={search}
           onChange={(e) => {
-            setIccid(e.target.value.trim());
+            setSearch(e.target.value.trim());
             setPagination((p) => ({ ...p, page: 0 }));
           }}
-          error={iccidInvalid}
-          helperText={
-            iccidInvalid ? "An ICCID, of 18 to 20 digits." : undefined
-          }
-          placeholder="8949440000001659208"
+          placeholder="ICCID, IMSI or MSISDN"
           sx={{ minWidth: 260 }}
         />
       </Stack>
       <QueryAlert query={jobs} subject="jobs" />
       <DataGrid<Job>
         aria-label="Jobs"
+        density="compact"
         rows={data?.items ?? []}
         columns={columns}
         rowCount={data?.total_count ?? 0}
@@ -152,13 +146,16 @@ export default function Jobs() {
         disableColumnSorting
         disableColumnFilter
         disableRowSelectionOnClick
+        hideFooterSelectedRowCount
         rowSelectionModel={{
           type: "include",
           ids: new Set(selected ? [selected.id] : []),
         }}
         disableVirtualization
         autoHeight
-        localeText={{ noRowsLabel: "No jobs." }}
+        localeText={{
+          noRowsLabel: debouncedSearch ? "No jobs match." : "No jobs.",
+        }}
         sx={{
           ...GRID_SX,
           "& .MuiDataGrid-row": { cursor: "pointer" },

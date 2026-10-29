@@ -94,7 +94,11 @@ const profileErrors = (p: Profile) => ({
     isMSISDN(p.msisdn),
     "An E.164 number, such as +15550000001.",
   ),
-  tar: errorFor(p.tar, isTAR(p.tar), "b00001, or b00020 to b0011f."),
+  tar: errorFor(
+    p.tar,
+    isTAR(p.tar),
+    "b00001, b00010 to b0001f, or b00020 to b0011f.",
+  ),
 });
 
 const profileValid = (p: Profile) =>
@@ -116,7 +120,10 @@ function ProfileFields({
         value={profile.imsi}
         onChange={(e) => onChange({ imsi: e.target.value.trim() })}
         error={errors.imsi !== undefined}
-        helperText={errors.imsi ?? "Informational. Optional."}
+        helperText={
+          errors.imsi ??
+          "Optional: the IMSI the card holds. An IMSI write needs it."
+        }
         inputMode="numeric"
         placeholder="001010000000001"
       />
@@ -340,7 +347,7 @@ export function EditCardDialog({
       >
         {card.key_sets.map((k) => (
           <MenuItem key={k.version} value={k.version}>
-            {`${k.version} (${algorithmLabel(k.algorithm)})`}
+            {keySetLabel(k)}
           </MenuItem>
         ))}
       </TextField>

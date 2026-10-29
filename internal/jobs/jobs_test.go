@@ -502,9 +502,9 @@ func TestReadFailures(t *testing.T) {
 		answer string
 		err    string
 	}{
-		{"not an FCP", "02" + "9000" + "6f00", "not an FCP template"},
-		{"not entries", fcp(61), "is not a list of 5-octet entries"},
-		{"file not found", "01" + "6a82", "command 1 of 2 failed with status word 6a82"},
+		{"not an FCP", "02" + "9000" + "6f00", "Not an FCP template"},
+		{"not entries", fcp(61), "is not a list of 5-octet entries."},
+		{"file not found", "01" + "6a82", "Command 1 of 2 failed with status word 6a82."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forms(t, func(t *testing.T, generic bool) {
@@ -538,9 +538,9 @@ func TestSetAndClear(t *testing.T) {
 		{"set", db.Job{Operation: db.OperationOPLMNSet, Slot: 2, MCC: "999", MNC: "99", Access: 0x4800}, "03" + "9000" + entry, db.JobSucceeded, ""},
 		{"clear", clear2, "03" + "9000" + "ffffff0000", db.JobSucceeded, ""},
 		{"clear with a warning", clear2, "03" + "6282" + "ffffff0000", db.JobSucceeded, ""},
-		{"read-back differs", clear2, "03" + "9000" + entry, db.JobFailed, "reads back"},
-		{"update refused", clear2, "02" + "6982", db.JobFailed, "command 2 of 3"},
-		{"read-back failed", clear2, "03" + "6f00", db.JobUnconfirmed, "written, but"},
+		{"read-back differs", clear2, "03" + "9000" + entry, db.JobFailed, "Slot 2 reads back 999/99 (E-UTRAN WB-S1, E-UTRAN NB-S1, NG-RAN) instead of an empty entry."},
+		{"update refused", clear2, "02" + "6982", db.JobFailed, "Command 2 of 3"},
+		{"read-back failed", clear2, "03" + "6f00", db.JobUnconfirmed, "Written, but"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forms(t, func(t *testing.T, generic bool) {
@@ -565,6 +565,95 @@ func TestSetAndClear(t *testing.T) {
 	}
 }
 
+// imsiWrite replaces the lab card's IMSI 001010000000001 with 001010000000002, whose EF.IMSI is imsi2.
+var imsiWrite = db.Job{Operation: db.OperationIMSIWrite, IMSI: "001010000000002", PreviousIMSI: "001010000000001"}
+
+const imsi2 = "080910100000000020"
+
+// TestIMSIWrite checks that an IMSI write succeeds only when EF.IMSI reads back what it wrote, and that only then
+// the card's IMSI on record becomes the new one: a failed write left the card's, and an unconfirmed one may have.
+func TestIMSIWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer string
+		status db.JobStatus
+		err    string
+		imsi   string
+	}{
+		{"written", "03" + "9000" + imsi2, db.JobSucceeded, "", "001010000000002"},
+		{"read-back differs", "03" + "9000" + "080910100000000010", db.JobFailed, "EF.IMSI reads back 001010000000001 instead of 001010000000002.", "001010000000001"},
+		{"update refused", "02" + "6982", db.JobFailed, "Command 2 of 3", "001010000000001"},
+		{"file not found", "01" + "6a82", db.JobFailed, "Command 1 of 3", "001010000000001"},
+		{"read-back failed", "03" + "6f00", db.JobUnconfirmed, "Written, but", "001010000000001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, "+15550000001", sja5(t))
+			id := e.queue(t, imsiWrite)
+
+			e.step()
+
+			e.answer(t, id, ota.StatusPoROK, tc.answer)
+			e.step()
+
+			j := e.job(t, id)
+			if j.Status != tc.status || !strings.Contains(j.Error, tc.err) || len(e.smsc.sent()) != 1 {
+				t.Fatalf("job = %+v", j)
+			}
+
+			card, err := e.store.GetCard(context.Background(), iccid)
+			if err != nil || card.IMSI != tc.imsi {
+				t.Fatalf("card IMSI = %q, %v, want %s", card.IMSI, err, tc.imsi)
+			}
+		})
+	}
+
+	// Without a PoR, the write may or may not have taken effect: the IMSI on record stays until a late PoR tells.
+	t.Run("late PoR", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, imsiWrite)
+
+		e.step()
+
+		j := e.job(t, id)
+		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
+
+		card, _ := e.store.GetCard(context.Background(), iccid)
+		if j := e.job(t, id); j.Status != db.JobUnconfirmed || card.IMSI != "001010000000001" {
+			t.Fatalf("after the receipt, job = %+v, card IMSI %s", j, card.IMSI)
+		}
+
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusPoROK, "039000"+imsi2)))
+
+		card, _ = e.store.GetCard(context.Background(), iccid)
+		if j := e.job(t, id); j.Status != db.JobSucceeded || card.IMSI != "001010000000002" {
+			t.Fatalf("after the PoR, job = %+v, card IMSI %s", j, card.IMSI)
+		}
+	})
+
+	// A late PoR of a write that a later write followed does not set the IMSI on record: the card ran the later one
+	// after it.
+	t.Run("late PoR after a later write", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		first := e.queue(t, imsiWrite)
+
+		e.step()
+
+		j := e.job(t, first)
+		e.smsc.deliver(t, e.receipt(j, smpp.StateExpired))
+
+		second := e.queue(t, db.Job{Operation: db.OperationIMSIWrite, IMSI: "001010000000003", PreviousIMSI: "001010000000001"})
+
+		e.step()
+		e.answer(t, second, ota.StatusPoROK, "039000"+"080910100000000030")
+		e.smsc.deliver(t, e.simAnswer(j, e.por(t, first, ota.StatusPoROK, "039000"+imsi2)))
+
+		card, _ := e.store.GetCard(context.Background(), iccid)
+		if e.job(t, first).Status != db.JobSucceeded || card.IMSI != "001010000000003" {
+			t.Fatalf("first = %+v, card IMSI %s", e.job(t, first), card.IMSI)
+		}
+	})
+}
+
 func TestPoRStatus(t *testing.T) {
 	set := db.Job{Operation: db.OperationOPLMNClear, Slot: 2}
 	read := db.Job{Operation: db.OperationOPLMNRead}
@@ -576,11 +665,11 @@ func TestPoRStatus(t *testing.T) {
 		want   db.JobStatus
 		err    string
 	}{
-		{"write answered by SMS-SUBMIT", set, ota.StatusResponseInSubmit, db.JobUnconfirmed, "response_in_sms_submit"},
-		{"write needing more time", set, ota.StatusMoreTime, db.JobUnconfirmed, "more_time"},
-		{"read answered by SMS-SUBMIT", read, ota.StatusResponseInSubmit, db.JobFailed, "response_in_sms_submit"},
-		{"counter low", set, ota.StatusCounterLow, db.JobFailed, "counter_low"},
-		{"TAR unknown", set, ota.StatusTARUnknown, db.JobFailed, "no application at TAR b00001"},
+		{"write answered by SMS-SUBMIT", set, ota.StatusResponseInSubmit, db.JobUnconfirmed, "by SMS-SUBMIT: answer by SMS (0B)."},
+		{"write needing more time", set, ota.StatusMoreTime, db.JobUnconfirmed, "more time needed (08)."},
+		{"read answered by SMS-SUBMIT", read, ota.StatusResponseInSubmit, db.JobFailed, "answer by SMS (0B)."},
+		{"counter low", set, ota.StatusCounterLow, db.JobFailed, "The card refused the command: counter too low (02)."},
+		{"TAR unknown", set, ota.StatusTARUnknown, db.JobFailed, "The card has no application at TAR b00001"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forms(t, func(t *testing.T, generic bool) {
@@ -721,8 +810,8 @@ func TestNoPoR(t *testing.T) {
 		err    string
 	}{
 		{"write delivered", clear2, nil, smpp.StateDelivered, db.JobUnconfirmed, "cannot authenticate"},
-		{"write expired", clear2, nil, smpp.StateExpired, db.JobUnconfirmed, "message expired"},
-		{"write undeliverable", clear2, nil, smpp.StateUndeliverable, db.JobUnconfirmed, "message undeliverable"},
+		{"write expired", clear2, nil, smpp.StateExpired, db.JobUnconfirmed, "Message expired"},
+		{"write undeliverable", clear2, nil, smpp.StateUndeliverable, db.JobUnconfirmed, "Message undeliverable"},
 		{"read delivered", read, nil, smpp.StateDelivered, db.JobFailed, "without a PoR"},
 		{"read rejected", read, nil, smpp.StateRejected, db.JobFailed, "rejected"},
 		// L2: ACCEPTD is final (SMPP 3.4 appendix B, table B-2).
@@ -883,7 +972,7 @@ func TestReceiptBeforePoR(t *testing.T) {
 		e.smsc.deliver(t, e.receipt(j, smpp.StateDelivered))
 		e.smsc.deliver(t, e.simAnswer(j, e.por(t, id, ota.StatusCounterLow, "")))
 
-		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "counter_low") || j.PoRMissing {
+		if j := e.job(t, id); j.Status != db.JobFailed || !strings.Contains(j.Error, "counter too low (02)") || j.PoRMissing {
 			t.Fatalf("job = %+v", j)
 		}
 	})
@@ -908,7 +997,7 @@ func TestNoAnswer(t *testing.T) {
 	e.step()
 
 	j := e.job(t, id)
-	if j.Status != db.JobUnconfirmed || !strings.Contains(j.Error, "no PoR and no delivery receipt") || !j.PoRMissing {
+	if j.Status != db.JobUnconfirmed || !strings.Contains(j.Error, "No PoR and no delivery receipt") || !j.PoRMissing {
 		t.Fatalf("job = %+v", j)
 	}
 
@@ -1288,6 +1377,8 @@ func TestScript(t *testing.T) {
 			"00a4000c026f6100d600050599f999480000b0000505",
 		},
 		{db.Job{Operation: db.OperationOPLMNClear, Slot: 2}, "00a4000c026f6100d6000505ffffff000000b0000505"},
+		// The script that the lab sysmoISIM-SJA5 ran over the air: the whole of EF.IMSI, written and read back.
+		{imsiWrite, "00a4000c026f07" + "00d6000009" + imsi2 + "00b0000009"},
 	} {
 		s, err := jobs.Script(tc.job)
 		if err != nil {
@@ -1311,6 +1402,8 @@ func TestScript(t *testing.T) {
 		{Operation: db.OperationOPLMNSet, Slot: 2, MCC: "99", MNC: "99"},
 		{Operation: db.OperationOPLMNRead, Step: 1, FileSize: -1},
 		{Operation: db.OperationOPLMNRead, Step: 4, FileSize: 255},
+		{Operation: db.OperationIMSIWrite, IMSI: "00101"},
+		{Operation: db.OperationIMSIWrite, IMSI: "0010100000000012"},
 	} {
 		if _, err := jobs.Script(j); err == nil {
 			t.Fatalf("%+v: expected an error", j)

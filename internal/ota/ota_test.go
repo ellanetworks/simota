@@ -271,6 +271,16 @@ func TestStatusString(t *testing.T) {
 	}
 }
 
+func TestStatusLabel(t *testing.T) {
+	for s, want := range map[Status]string{
+		0x02: "counter too low (02)", 0x0a: "security too low (0A)", 0x0d: "reserved 0D", 0xc1: "proprietary C1", 0xff: "reserved FF",
+	} {
+		if got := s.Label(); got != want {
+			t.Fatalf("%#x = %s, want %s", byte(s), got, want)
+		}
+	}
+}
+
 func TestEncodeCommandTooLong(t *testing.T) {
 	c := Command{Keyset: sja5(t), TAR: simRFM, Data: make([]byte, 120)}
 	if _, _, err := c.Encode(); err == nil {

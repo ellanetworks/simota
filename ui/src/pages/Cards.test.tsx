@@ -194,13 +194,14 @@ describe("Cards", () => {
     expect(
       screen.getByRole("heading", { name: "Cards (1)" }),
     ).toBeInTheDocument();
-    // IMSI and Updated are hidden by default; the key set in use is marked.
-    expect(rowCells(card.iccid).slice(0, 5)).toEqual([
+    // The table shows the key set in use only.
+    expect(rowCells(card.iccid).slice(0, 6)).toEqual([
       "8949440000001659208",
+      IMSI,
       "+15550000001",
       "Lab phone",
       "b00001",
-      "1 (3DES, counter 3)2 (AES, CC 4, counter 0) · in use",
+      "2 (AES)",
     ]);
   });
 
@@ -457,7 +458,7 @@ describe("Edit", () => {
     expect(textbox(dialog, /^TAR/).value).toBe(card.tar);
     expect(
       within(dialog).getByRole("combobox", { name: /^Key Set/ }),
-    ).toHaveTextContent("2 (AES)");
+    ).toHaveTextContent("2 (AES, CC 4, counter 0)");
   });
 
   it("offers only the card's key sets", async () => {
@@ -472,7 +473,7 @@ describe("Edit", () => {
       within(screen.getByRole("listbox"))
         .getAllByRole("option")
         .map((o) => o.textContent),
-    ).toEqual(["1 (3DES)", "2 (AES)"]);
+    ).toEqual(["1 (3DES, counter 3)", "2 (AES, CC 4, counter 0)"]);
   });
 
   it("sends the card's profile and key set, and refreshes the list", async () => {
@@ -482,7 +483,7 @@ describe("Edit", () => {
 
     type(dialog, /^Description/, "Spare");
     type(dialog, /^MSISDN/, "");
-    choose(dialog, /^Key Set/, "1 (3DES)");
+    choose(dialog, /^Key Set/, "1 (3DES, counter 3)");
     fireEvent.click(within(dialog).getByRole("button", { name: "Update" }));
 
     await waitFor(() => expect(calls).toHaveLength(1));
@@ -498,11 +499,11 @@ describe("Edit", () => {
       },
     });
     await waitFor(() =>
-      expect(rowCells(card.iccid).slice(1, 5)).toEqual([
+      expect(rowCells(card.iccid).slice(2, 6)).toEqual([
         "—",
         "Spare",
         "b00001",
-        "1 (3DES, counter 3) · in use2 (AES, CC 4, counter 0)",
+        "1 (3DES)",
       ]),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

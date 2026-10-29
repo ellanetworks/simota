@@ -65,6 +65,7 @@ export const operationLabels: Record<JobOperation, string> = {
   oplmn_read: "Read roaming list",
   oplmn_set: "Set roaming list entry",
   oplmn_clear: "Clear roaming list entry",
+  imsi_write: "Write IMSI",
 };
 
 // accessLabel is a list of access technologies, with their identifier in hex when it is known, such as
@@ -88,9 +89,55 @@ export const jobLabel = (job: Job): string => {
       return `Set slot ${job.slot} to ${plmnLabel(job.mcc, job.mnc)} (${accessLabel(job.access)})`;
     case "oplmn_clear":
       return `Clear slot ${job.slot}`;
+    case "imsi_write":
+      return `Write IMSI ${job.imsi}`;
     default:
       return operationLabels.oplmn_read;
   }
+};
+
+// porCodes are the Response Status Codes of a PoR, by their name in the API, with their label (TS 102 225 table 5,
+// TS 31.115 clause 7). The server's job errors use the same words.
+const porCodes: Record<string, [code: string, label: string]> = {
+  por_ok: ["00", "OK"],
+  rc_cc_ds_failed: ["01", "Checksum failed"],
+  counter_low: ["02", "Counter too low"],
+  counter_high: ["03", "Counter too high"],
+  counter_blocked: ["04", "Counter blocked"],
+  ciphering_error: ["05", "Ciphering error"],
+  unidentified_security_error: ["06", "Security error"],
+  insufficient_memory: ["07", "Out of memory"],
+  more_time: ["08", "More time needed"],
+  tar_unknown: ["09", "Unknown TAR"],
+  insufficient_security_level: ["0A", "Security too low"],
+  response_in_sms_submit: ["0B", "Answer by SMS"],
+  response_in_ussd: ["0C", "Answer by USSD"],
+};
+
+// porCode is a PoR status as its code in hex and its label, such as ["02", "Counter too low"]; proprietary_c0 is
+// ["C0", "Proprietary C0"].
+const porCode = (status: string): [code: string, label: string] => {
+  const known = porCodes[status];
+  if (known) return known;
+  const m = /^(proprietary|reserved)_([0-9a-f]{2})$/.exec(status);
+  if (!m) return ["", status];
+  const code = m[2].toUpperCase();
+  return [
+    code,
+    `${m[1] === "proprietary" ? "Proprietary" : "Reserved"} ${code}`,
+  ];
+};
+
+// porLabel is a PoR status in words, such as "Counter too low", or a dash.
+export const porLabel = (status?: string): string =>
+  status ? porCode(status)[1] : "—";
+
+// porDetail is a PoR status with its code, such as "Counter too low (02)". A proprietary or reserved code is in its
+// label already.
+export const porDetail = (status?: string): string => {
+  if (!status) return "—";
+  const [code, label] = porCode(status);
+  return code && !label.endsWith(code) ? `${label} (${code})` : label;
 };
 
 // MAX_SLOT is the last entry a job may write, as the server allows.

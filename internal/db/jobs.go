@@ -8,13 +8,14 @@ import (
 	"time"
 )
 
-// Operation is what a job does on a card's EF.OPLMNwAcT.
+// Operation is what a job does on a card's USIM: on its EF.OPLMNwAcT, or its EF.IMSI.
 type Operation string
 
 const (
 	OperationOPLMNRead  Operation = "oplmn_read"
 	OperationOPLMNSet   Operation = "oplmn_set"
 	OperationOPLMNClear Operation = "oplmn_clear"
+	OperationIMSIWrite  Operation = "imsi_write"
 )
 
 // JobStatus is where a job is: queued for its next command, sent to the SMSC and awaiting the card's answer, or done.
@@ -38,6 +39,8 @@ type Job struct {
 	Slot     int
 	MCC, MNC string
 	Access   int
+	// IMSI is the IMSI an IMSI write writes, and PreviousIMSI the card's IMSI on record that it replaces.
+	IMSI, PreviousIMSI string
 	// TAR and KVN are the card's when the job was created: its commands and PoRs use them.
 	TAR    []byte
 	KVN    int
@@ -69,8 +72,12 @@ type Job struct {
 // ErrBusy is a job for a card that has one queued or sent already.
 var ErrBusy = errors.New("card has a job in progress")
 
+// ErrIMSIMismatch is an IMSI write whose previous IMSI is not the card's IMSI on record.
+var ErrIMSIMismatch = errors.New("previous IMSI is not the card's IMSI on record")
+
 // CreateJobs queues jobs, all or none, with the TAR and key set version of their card. A card may have one job in
-// progress at a time.
+// progress at a time. An IMSI write is queued only while its previous IMSI is the card's IMSI on record, which changes
+// only by the operator or by an IMSI write that succeeds: the write replaces the IMSI that the operator means to.
 func (d *DB) CreateJobs(ctx context.Context, jobs []Job) ([]int64, error) {
 	ids := make([]int64, 0, len(jobs))
 
@@ -88,11 +95,28 @@ func (d *DB) CreateJobs(ctx context.Context, jobs []Job) ([]int64, error) {
 				return fmt.Errorf("%w: %s", ErrBusy, j.ICCID)
 			}
 
-			res, err := tx.ExecContext(ctx, `INSERT INTO jobs (iccid, operation, slot, mcc, mnc, access, tar, kvn, status, step,
-				warning, error, por_missing, attempts, created_at, updated_at)
-				SELECT iccid, ?, ?, ?, ?, ?, tar, kvn, 'queued', 0, 0, '', 0, 0, ?, ?
+			if j.Operation == OperationIMSIWrite {
+				var imsi sql.NullString
+
+				err := tx.QueryRowContext(ctx, "SELECT imsi FROM cards WHERE iccid = ?", j.ICCID).Scan(&imsi)
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("card %s: %w", j.ICCID, ErrNotFound)
+				}
+
+				if err != nil {
+					return err
+				}
+
+				if !imsi.Valid || imsi.String != j.PreviousIMSI {
+					return fmt.Errorf("%w: %s", ErrIMSIMismatch, j.ICCID)
+				}
+			}
+
+			res, err := tx.ExecContext(ctx, `INSERT INTO jobs (iccid, operation, slot, mcc, mnc, access, imsi, previous_imsi,
+				tar, kvn, status, step, warning, error, por_missing, attempts, created_at, updated_at)
+				SELECT iccid, ?, ?, ?, ?, ?, ?, ?, tar, kvn, 'queued', 0, 0, '', 0, 0, ?, ?
 				FROM cards WHERE iccid = ?`, j.Operation, nullInt(j.Slot), nullString(j.MCC), nullString(j.MNC), nullAccess(j),
-				now, now, j.ICCID)
+				nullString(j.IMSI), nullString(j.PreviousIMSI), now, now, j.ICCID)
 			if err != nil {
 				return err
 			}
@@ -128,11 +152,15 @@ func (d *DB) GetJob(ctx context.Context, id int64) (Job, error) {
 	return jobs[0], nil
 }
 
-// ListJobs lists a page, from 1, of the jobs, newest first, of a card or of all when iccid is empty, and their number.
-func (d *DB) ListJobs(ctx context.Context, iccid string, page, perPage int) ([]Job, int, error) {
+// ListJobs lists a page, from 1, of the jobs, newest first, of the cards that search finds or of all when it is empty,
+// and their number.
+func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) ([]Job, int, error) {
 	where, args := "", []any{}
-	if iccid != "" {
-		where, args = "WHERE iccid = ?", []any{iccid}
+	if search != "" {
+		// search is part of the card's ICCID, IMSI or MSISDN.
+		where = `WHERE instr(iccid, ?) > 0 OR iccid IN (SELECT iccid FROM cards WHERE instr(coalesce(imsi, ''), ?) > 0
+			OR instr(msisdn, ?) > 0)`
+		args = []any{search, search, search}
 	}
 
 	var total int
@@ -219,13 +247,16 @@ func (d *DB) CountAttempt(ctx context.Context, id int64) (int, error) {
 }
 
 // FinishJob records the outcome of a job in progress: its final status, the answer it got, if any, the reason for a
-// failed or unconfirmed one, and whether it lacks the PoR to its last command.
+// failed or unconfirmed one, and whether it lacks the PoR to its last command. An IMSI write that succeeds makes its
+// IMSI the card's IMSI on record; one that fails or is unconfirmed leaves it, since the card may still hold it.
 func (d *DB) FinishJob(ctx context.Context, j Job) error {
 	return d.finish(ctx, j, "status IN ('queued', 'sent')")
 }
 
 // ReviseJob replaces the outcome of a job closed without the PoR to its last command, of counter j.Counter, with the
-// one that this PoR gives.
+// one that this PoR gives. An IMSI write that the PoR shows succeeded makes its IMSI the card's IMSI on record, unless
+// a later IMSI write of the card was created since: the card ran this one before it, and the later one's outcome
+// tells the card's IMSI.
 func (d *DB) ReviseJob(ctx context.Context, j Job) error {
 	return d.finish(ctx, j, "por_missing = 1 AND counter = ?", int64(j.Counter))
 }
@@ -235,23 +266,43 @@ func (d *DB) finish(ctx context.Context, j Job, where string, args ...any) error
 		return fmt.Errorf("finish job: status %q is not final", j.Status)
 	}
 
-	res, err := d.conn.ExecContext(ctx, `UPDATE jobs SET status = ?, file_size = ?, response = ?, por_status = ?,
-		status_word = ?, warning = ?, data = ?, error = ?, por_missing = ?, updated_at = ? WHERE id = ? AND `+where,
-		append([]any{
-			j.Status, nullUnknown(j.FileSize), j.Response, nullUnknown(j.PoRStatus), nullUnknown(j.StatusWord), j.Warning,
-			j.Data, j.Error, j.PoRMissing, d.now().UnixMilli(), j.ID,
-		}, args...)...)
-	if err != nil {
-		return fmt.Errorf("finish job: %w", err)
-	}
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		now := d.now().UnixMilli()
 
-	return affected(res)
+		res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = ?, file_size = ?, response = ?, por_status = ?,
+			status_word = ?, warning = ?, data = ?, error = ?, por_missing = ?, updated_at = ? WHERE id = ? AND `+where,
+			append([]any{
+				j.Status, nullUnknown(j.FileSize), j.Response, nullUnknown(j.PoRStatus), nullUnknown(j.StatusWord), j.Warning,
+				j.Data, j.Error, j.PoRMissing, now, j.ID,
+			}, args...)...)
+		if err != nil {
+			return fmt.Errorf("finish job: %w", err)
+		}
+
+		if err := affected(res); err != nil {
+			return err
+		}
+
+		if j.Status != JobSucceeded {
+			return nil
+		}
+
+		// The job's own row tells its operation and IMSI, whatever j holds.
+		if _, err := tx.ExecContext(ctx, `UPDATE cards SET imsi = w.imsi, updated_at = ? FROM jobs AS w
+			WHERE w.id = ? AND w.operation = 'imsi_write' AND cards.iccid = w.iccid
+			AND NOT EXISTS (SELECT 1 FROM jobs WHERE iccid = w.iccid AND operation = 'imsi_write' AND id > w.id)`,
+			now, j.ID); err != nil {
+			return fmt.Errorf("finish job: record the card's IMSI: %w", err)
+		}
+
+		return nil
+	})
 }
 
 func (d *DB) jobs(ctx context.Context, clause string, args ...any) ([]Job, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT id, iccid, operation, slot, mcc, mnc, access, tar, kvn, status, step,
-		file_size, counter, message_id, command, response, por_status, status_word, warning, data, error, por_missing,
-		created_at, updated_at FROM jobs `+clause, args...)
+	rows, err := d.conn.QueryContext(ctx, `SELECT id, iccid, operation, slot, mcc, mnc, access, imsi, previous_imsi, tar,
+		kvn, status, step, file_size, counter, message_id, command, response, por_status, status_word, warning, data, error,
+		por_missing, created_at, updated_at FROM jobs `+clause, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
@@ -266,16 +317,18 @@ func (d *DB) jobs(ctx context.Context, clause string, args ...any) ([]Job, error
 			slot, access, fileSize         sql.NullInt64
 			counter, porStatus, statusWord sql.NullInt64
 			mcc, mnc, messageID            sql.NullString
+			imsi, previousIMSI             sql.NullString
 			created, lastUpdated           int64
 		)
 
-		if err := rows.Scan(&j.ID, &j.ICCID, &j.Operation, &slot, &mcc, &mnc, &access, &j.TAR, &j.KVN, &j.Status, &j.Step,
-			&fileSize, &counter, &messageID, &j.Command, &j.Response, &porStatus, &statusWord, &j.Warning, &j.Data, &j.Error,
-			&j.PoRMissing, &created, &lastUpdated); err != nil {
+		if err := rows.Scan(&j.ID, &j.ICCID, &j.Operation, &slot, &mcc, &mnc, &access, &imsi, &previousIMSI, &j.TAR, &j.KVN,
+			&j.Status, &j.Step, &fileSize, &counter, &messageID, &j.Command, &j.Response, &porStatus, &statusWord, &j.Warning,
+			&j.Data, &j.Error, &j.PoRMissing, &created, &lastUpdated); err != nil {
 			return nil, fmt.Errorf("list jobs: %w", err)
 		}
 
 		j.Slot, j.MCC, j.MNC, j.Access, j.MessageID = int(slot.Int64), mcc.String, mnc.String, int(access.Int64), messageID.String
+		j.IMSI, j.PreviousIMSI = imsi.String, previousIMSI.String
 		j.Counter = uint64(counter.Int64)
 		j.FileSize, j.PoRStatus, j.StatusWord = unknown(fileSize), unknown(porStatus), unknown(statusWord)
 		j.CreatedAt, j.UpdatedAt = time.UnixMilli(created), time.UnixMilli(lastUpdated)

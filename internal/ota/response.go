@@ -45,6 +45,36 @@ var statusNames = map[Status]string{
 	StatusResponseInUSSD:            "response_in_ussd",
 }
 
+// statusLabels are the words of the statuses in a job's error, the UI's labels in a sentence.
+var statusLabels = map[Status]string{
+	StatusPoROK:                     "OK",
+	StatusIntegrityFailed:           "checksum failed",
+	StatusCounterLow:                "counter too low",
+	StatusCounterHigh:               "counter too high",
+	StatusCounterBlocked:            "counter blocked",
+	StatusCipheringError:            "ciphering error",
+	StatusUnidentifiedSecurityError: "security error",
+	StatusInsufficientMemory:        "out of memory",
+	StatusMoreTime:                  "more time needed",
+	StatusTARUnknown:                "unknown TAR",
+	StatusInsufficientSecurityLevel: "security too low",
+	StatusResponseInSubmit:          "answer by SMS",
+	StatusResponseInUSSD:            "answer by USSD",
+}
+
+// Label is s in words with its code, such as "counter too low (02)", or "proprietary C0".
+func (s Status) Label() string {
+	if l, ok := statusLabels[s]; ok {
+		return fmt.Sprintf("%s (%02X)", l, byte(s))
+	}
+
+	if s >= 0xc0 && s <= 0xfe {
+		return fmt.Sprintf("proprietary %02X", byte(s))
+	}
+
+	return fmt.Sprintf("reserved %02X", byte(s))
+}
+
 func (s Status) String() string {
 	if n, ok := statusNames[s]; ok {
 		return n

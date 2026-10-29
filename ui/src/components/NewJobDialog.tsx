@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Alert,
   Autocomplete,
   Box,
   Checkbox,
@@ -25,6 +26,7 @@ import {
   type JobOperation,
   type JobParams,
 } from "@/queries/jobs";
+import { isIMSI } from "@/utils/cards";
 import {
   ACCESS_TECHNOLOGIES,
   ALL_ACCESS_TECHNOLOGIES,
@@ -60,6 +62,8 @@ export default function NewJobDialog({
   const [mnc, setMnc] = useState("");
   const [access, setAccess] = useState<AccessTechnology[]>(DEFAULT_ACCESS);
   const [more, setMore] = useState(false);
+  const [imsi, setImsi] = useState("");
+  const [previousImsi, setPreviousImsi] = useState("");
 
   const cards = useQuery({
     queryKey: ["cards", { page: 1, pageSize: CARD_OPTIONS }],
@@ -86,6 +90,8 @@ export default function NewJobDialog({
         };
       case "oplmn_clear":
         return { iccids, operation, slot: Number(slot) };
+      case "imsi_write":
+        return { iccids, operation, imsi, previous_imsi: previousImsi };
       default:
         return { iccids, operation };
     }
@@ -121,11 +127,51 @@ export default function NewJobDialog({
   const mncError = mnc === "" || isMNC(mnc) ? undefined : "2 or 3 digits.";
   const accessError = access.length === 0 ? "Choose at least one." : undefined;
 
+  // An IMSI is one subscription's: it is written to one card, in place of the IMSI on record that the operator
+  // states, which the server checks. A card known to have none needs it set first.
+  const writesIMSI = operation === "imsi_write";
+  const cardsError =
+    writesIMSI && iccids.length > 1
+      ? "An IMSI write takes one card."
+      : undefined;
+  const noIMSIOnRecord =
+    writesIMSI &&
+    iccids.length === 1 &&
+    byIccid.has(iccids[0]) &&
+    !byIccid.get(iccids[0])?.imsi;
+  // The card's IMSI on record, when the dialog knows it, tells a mistyped current IMSI before the server does; the
+  // error waits until the IMSI typed is as long.
+  const imsiOnRecord =
+    writesIMSI && iccids.length === 1
+      ? byIccid.get(iccids[0])?.imsi
+      : undefined;
+  const notOnRecord =
+    !!imsiOnRecord && previousImsi !== "" && previousImsi !== imsiOnRecord;
+  // isIMSI takes an empty value: an empty field shows no error, and keeps Create disabled.
+  const imsiError = isIMSI(imsi) ? undefined : "6 to 15 digits.";
+  const previousImsiError = noIMSIOnRecord
+    ? "The card has no IMSI on record: edit the card to set the IMSI it holds."
+    : !isIMSI(previousImsi)
+      ? "6 to 15 digits."
+      : notOnRecord && previousImsi.length >= (imsiOnRecord?.length ?? 0)
+        ? "Not the card's IMSI on record."
+        : undefined;
+
   const valid =
     iccids.length > 0 &&
-    (operation === "oplmn_read" || isSlot(slot)) &&
+    cardsError === undefined &&
+    (operation === "oplmn_read" || writesIMSI || isSlot(slot)) &&
     (operation !== "oplmn_set" ||
-      (isMCC(mcc) && isMNC(mnc) && access.length > 0));
+      (isMCC(mcc) && isMNC(mnc) && access.length > 0)) &&
+    (!writesIMSI ||
+      (imsi !== "" &&
+        previousImsi !== "" &&
+        imsiError === undefined &&
+        previousImsiError === undefined &&
+        !notOnRecord));
+
+  // The dialog offers the first CARD_OPTIONS cards only; a card's row on the Cards page reaches any other.
+  const moreCards = (cards.data?.total_count ?? 0) > CARD_OPTIONS;
 
   return (
     <EditDialog
@@ -135,7 +181,7 @@ export default function NewJobDialog({
       error={mutation.error}
       onSubmit={() => mutation.mutate()}
       onClose={onClose}
-      submitLabel="Create"
+      submitLabel={writesIMSI ? "Write IMSI" : "Create"}
       pendingLabel="Creating…"
       failure="Could not create the jobs"
     >
@@ -171,11 +217,15 @@ export default function NewJobDialog({
             {...input}
             label="Cards"
             required={iccids.length === 0}
-            error={cards.error !== null}
+            error={cards.error !== null || cardsError !== undefined}
             helperText={
               cards.error
                 ? `Could not load the cards: ${cards.error.message}`
-                : "A card needs an MSISDN, and may have one job in progress."
+                : (cardsError ??
+                  "A card needs an MSISDN, and may have one job in progress." +
+                    (moreCards
+                      ? ` Only the first ${CARD_OPTIONS} cards are listed: start a job for another from its row on the Cards page.`
+                      : ""))
             }
           />
         )}
@@ -192,7 +242,38 @@ export default function NewJobDialog({
           </MenuItem>
         ))}
       </TextField>
-      {operation !== "oplmn_read" && (
+      {writesIMSI && (
+        <>
+          <Alert severity="warning">
+            A wrong IMSI cuts the card off the network, and so off OTA: it
+            cannot be undone over the air. Provision the new IMSI in the core
+            first, with the card&apos;s keys and MSISDN; its MNC must be as long
+            as the current one&apos;s. The phone uses it when it restarts.
+          </Alert>
+          <TextField
+            label="Current IMSI"
+            value={previousImsi}
+            onChange={(e) => setPreviousImsi(e.target.value.trim())}
+            error={previousImsiError !== undefined}
+            helperText={
+              previousImsiError ??
+              "The IMSI the card holds, which the new one replaces: it must be the card's IMSI on record."
+            }
+            inputMode="numeric"
+            required
+          />
+          <TextField
+            label="New IMSI"
+            value={imsi}
+            onChange={(e) => setImsi(e.target.value.trim())}
+            error={imsiError !== undefined}
+            helperText={imsiError ?? "MCC, MNC and MSIN, at most 15 digits."}
+            inputMode="numeric"
+            required
+          />
+        </>
+      )}
+      {operation !== "oplmn_read" && !writesIMSI && (
         <TextField
           label="Slot"
           value={slot}

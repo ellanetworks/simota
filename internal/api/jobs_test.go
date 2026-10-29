@@ -61,7 +61,7 @@ func TestCreateJobs(t *testing.T) {
 		t.Fatalf("second job = %d, want 409", code)
 	}
 
-	code, body = e.do(t, http.MethodGet, "/api/v1/jobs?iccid=8988211000000000025", "", "")
+	code, body = e.do(t, http.MethodGet, "/api/v1/jobs?search=000000025", "", "")
 
 	var list struct{ Result api.ListJobsResponse }
 	if err := json.Unmarshal([]byte(body), &list); err != nil {
@@ -174,6 +174,81 @@ func TestJobEntries(t *testing.T) {
 		db.JobUnconfirmed, "99f9990800")
 	if set.Status != "unconfirmed" || len(set.Entries) != 1 || set.Entries[0].Slot != 7 || set.Entries[0].MNC != "99" {
 		t.Fatalf("set = %+v", set)
+	}
+}
+
+// TestIMSIWrite checks that an IMSI write takes one card, a valid IMSI, and the card's IMSI on record as the one it
+// replaces; and that the IMSI read back is shown, and becomes the card's when the write succeeds.
+func TestIMSIWrite(t *testing.T) {
+	e := newEnv(t)
+	createCard(t, e, "8988211000000000017", "+15550000001")
+	createCard(t, e, "8988211000000000025", "+15550000002")
+
+	for _, tc := range []struct {
+		body string
+		code int
+	}{
+		{`{"iccids":["8988211000000000017","8988211000000000025"],"operation":"imsi_write","imsi":"001010000000002","previous_imsi":"001010000000001"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"0010100000000021","previous_imsi":"001010000000001"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"00101","previous_imsi":"001010000000001"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"00101000000000a","previous_imsi":"001010000000001"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"001010000000002"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"001010000000002","previous_imsi":"001010000000001","slot":1}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"oplmn_read","imsi":"001010000000002"}`, http.StatusBadRequest},
+		{`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"001010000000002","previous_imsi":"001010000000009"}`, http.StatusConflict},
+	} {
+		if code, body := e.do(t, http.MethodPost, "/api/v1/jobs", "application/json", tc.body); code != tc.code {
+			t.Fatalf("%s = %d %s, want %d", tc.body, code, body, tc.code)
+		}
+	}
+
+	// A card without an IMSI on record needs it set first.
+	if code, body := e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000025", "application/json",
+		`{"msisdn":"+15550000002","tar":"b00001","kvn":1}`); code != http.StatusOK {
+		t.Fatalf("clear IMSI = %d %s", code, body)
+	}
+
+	if code, body := e.do(t, http.MethodPost, "/api/v1/jobs", "application/json",
+		`{"iccids":["8988211000000000025"],"operation":"imsi_write","imsi":"001010000000002","previous_imsi":"001010000000001"}`); code != http.StatusConflict || !strings.Contains(body, "no IMSI on record") {
+		t.Fatalf("no IMSI on record = %d %s", code, body)
+	}
+
+	code, body := e.do(t, http.MethodPost, "/api/v1/jobs", "application/json",
+		`{"iccids":["8988211000000000017"],"operation":"imsi_write","imsi":"001010000000002","previous_imsi":"001010000000001"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, body)
+	}
+
+	var created struct{ Result api.JobsResponse }
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	j := created.Result.Items[0]
+	if j.Operation != "imsi_write" || j.IMSI != "001010000000002" || j.PreviousIMSI != "001010000000001" || j.Slot != 0 ||
+		j.IMSIReadBack != "" {
+		t.Fatalf("job = %+v", j)
+	}
+
+	stored, _ := e.store.GetJob(context.Background(), j.ID)
+	if err := e.store.MarkJobSent(context.Background(), j.ID, 1, "9", []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+
+	stored.Data, _ = hex.DecodeString("080910100000000020")
+	stored.Status, stored.PoRStatus, stored.StatusWord = db.JobSucceeded, 0, 0x9000
+
+	if err := e.store.FinishJob(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, body := e.do(t, http.MethodGet, "/api/v1/jobs/"+itoa(j.ID), "", ""); !strings.Contains(body, `"imsi_read_back":"001010000000002"`) ||
+		strings.Contains(body, `"entries"`) {
+		t.Fatalf("get = %s", body)
+	}
+
+	if _, body := e.do(t, http.MethodGet, "/api/v1/cards/8988211000000000017", "", ""); !strings.Contains(body, `"imsi":"001010000000002"`) {
+		t.Fatalf("card = %s", body)
 	}
 }
 

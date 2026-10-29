@@ -5,9 +5,11 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,10 +182,28 @@ func (g *Gateway) State() State {
 	}
 
 	if st.LastError != nil {
-		out.LastError = st.LastError.Error()
+		out.LastError = errorText(st.LastError)
 	}
 
 	return out
+}
+
+// errorText is err for the operator, as a sentence without the "smpp: " of each error it wraps, and a refused bind as
+// its command_status, such as "Bind refused: ESME_RBINDFAIL".
+func errorText(err error) string {
+	s := err.Error()
+
+	var se *smpp.StatusError
+	if errors.As(err, &se) {
+		s = strings.Replace(s, se.Error(), se.Status.String(), 1)
+	}
+
+	s = strings.ReplaceAll(s, "smpp: ", "")
+	if s == "" {
+		return s
+	}
+
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // Close unbinds the session until ctx ends.

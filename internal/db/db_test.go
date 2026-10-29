@@ -422,6 +422,87 @@ func TestJobSteps(t *testing.T) {
 	}
 }
 
+// TestIMSIWrite checks that an IMSI write is queued only for the IMSI on record that it names, and that it becomes
+// the card's IMSI on record when it succeeds, not otherwise.
+func TestIMSIWrite(t *testing.T) {
+	ctx := context.Background()
+	d, _ := open(t)
+
+	c := card("8988211000000000017", 1)
+	c.MSISDN = "+15550000017"
+
+	if err := d.CreateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	write := db.Job{ICCID: c.ICCID, Operation: db.OperationIMSIWrite, IMSI: "001010000000002", PreviousIMSI: "001010000000001"}
+
+	// Without an IMSI on record, then with another one.
+	for _, imsi := range []string{"", "001010000000009"} {
+		c.IMSI = imsi
+		if err := d.UpdateCard(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := d.CreateJobs(ctx, []db.Job{write}); !errors.Is(err, db.ErrIMSIMismatch) {
+			t.Fatalf("IMSI on record %q: err = %v, want ErrIMSIMismatch", imsi, err)
+		}
+	}
+
+	c.IMSI = "001010000000001"
+	if err := d.UpdateCard(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	finish := func(status db.JobStatus) {
+		t.Helper()
+
+		ids, err := d.CreateJobs(ctx, []db.Job{write})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		j, _ := d.GetJob(ctx, ids[0])
+		if j.IMSI != write.IMSI || j.PreviousIMSI != write.PreviousIMSI {
+			t.Fatalf("created = %+v", j)
+		}
+
+		j.Status = status
+		if err := d.FinishJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	imsi := func() string {
+		got, err := d.GetCard(ctx, c.ICCID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return got.IMSI
+	}
+
+	for _, status := range []db.JobStatus{db.JobFailed, db.JobUnconfirmed} {
+		if finish(status); imsi() != "001010000000001" {
+			t.Fatalf("after a write %s, IMSI = %s", status, imsi())
+		}
+	}
+
+	if finish(db.JobSucceeded); imsi() != "001010000000002" {
+		t.Fatalf("after a write succeeded, IMSI = %s", imsi())
+	}
+
+	// Another job that succeeds does not touch it.
+	ids, err := d.CreateJobs(ctx, []db.Job{{ICCID: c.ICCID, Operation: db.OperationOPLMNRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.FinishJob(ctx, db.Job{ID: ids[0], Status: db.JobSucceeded}); err != nil || imsi() != "001010000000002" {
+		t.Fatalf("after a read, IMSI = %s, %v", imsi(), err)
+	}
+}
+
 func TestSMSC(t *testing.T) {
 	ctx := context.Background()
 	d, _ := open(t)

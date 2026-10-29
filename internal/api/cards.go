@@ -25,7 +25,7 @@ var (
 // Card is a card without its keys: the API never returns key material.
 type Card struct {
 	ICCID string `json:"iccid"`
-	// IMSI is informational, absent when unknown: OTA reaches the card by its MSISDN.
+	// IMSI is the IMSI on record, absent when unknown: OTA reaches the card by its MSISDN.
 	IMSI        string         `json:"imsi,omitempty"`
 	MSISDN      string         `json:"msisdn"`
 	Description string         `json:"description"`

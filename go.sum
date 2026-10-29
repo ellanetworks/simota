@@ -1,5 +1,5 @@
-github.com/ellanetworks/smsc/smpp v0.0.0-20261028204907-fd7fdf881a5f h1:tg4htlszkPiBZ5nKccT3n6za8G+H9F+t7jqZ5mlnjUI=
-github.com/ellanetworks/smsc/smpp v0.0.0-20261028204907-fd7fdf881a5f/go.mod h1:xtgWZVZYcEx5zl8Jkl46xF3LYV6ukSxUIJygJlbs0bg=
+github.com/ellanetworks/smsc/smpp v0.0.0-20261028210833-736ded14033a h1:3JM3R42SJAu9bz7osGPkeWZG+DnFsbkVPcL0LkRUGiY=
+github.com/ellanetworks/smsc/smpp v0.0.0-20261028210833-736ded14033a/go.mod h1:xtgWZVZYcEx5zl8Jkl46xF3LYV6ukSxUIJygJlbs0bg=
 github.com/linxGnu/gosmpp v0.3.1 h1:8weIv03SG8+k/vI3bO7SnZ6URjqpXy2B8EJQkPzwmjI=
 github.com/linxGnu/gosmpp v0.3.1/go.mod h1:H5Ca2UBCIYast4KRjc3hwgOkjzpghr4CB77jueWGQmc=
 github.com/mattn/go-sqlite3 v1.14.52 h1:wVbm2Qnf4OXkqhBTSPuCRZDRnxfbVrrmiCEroVdog8U=

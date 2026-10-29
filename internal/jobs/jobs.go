@@ -325,7 +325,7 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 
 	// If the message cannot be recorded, the job stays queued and a later step sends its command again, with a new,
 	// higher counter. The card executes it as a new command (TS 102 225 clause 5.1.4), which is harmless: a command
-	// writes the same entry and reads it back, or reads. The first message's PoR carries the spent counter, so it
+	// writes the same octets and reads them back, or reads. The first message's PoR carries the spent counter, so it
 	// answers no job's command and is left aside; a duplicate never reuses a counter, which the card would refuse.
 	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage); err != nil {
 		r.Logger.Error("failed to mark job sent", slog.Int64("job", j.ID), slog.String("message", id), slog.Any("error", err))
@@ -719,7 +719,7 @@ func receiptField(text []byte, name string) string {
 // noPoR is the outcome of a command answered by no PoR: unconfirmed for a write, which the card may have applied,
 // failed for a read.
 func noPoR(j db.Job, reason string) db.Job {
-	j.Status, j.Error = db.JobFailed, reason
+	j.Status, j.Error = db.JobFailed, asSentence(reason)
 	if writes(j) {
 		j.Status = db.JobUnconfirmed
 	}
@@ -728,7 +728,7 @@ func noPoR(j db.Job, reason string) db.Job {
 }
 
 func writes(j db.Job) bool {
-	return j.Operation == db.OperationOPLMNSet || j.Operation == db.OperationOPLMNClear
+	return j.Operation == db.OperationOPLMNSet || j.Operation == db.OperationOPLMNClear || j.Operation == db.OperationIMSIWrite
 }
 
 // Outcome is job j after the PoR r, of user data packet, that answers its last command: the job with the next command
@@ -754,27 +754,27 @@ func Outcome(j db.Job, r ota.Response, packet []byte) (db.Job, bool) {
 			status = db.JobUnconfirmed
 		}
 
-		return fail(status, "the card sends its result later, by SMS-SUBMIT: %s", r.Status)
+		return fail(status, "The card sends its result later, by SMS-SUBMIT: %s.", r.Status.Label())
 	case ota.StatusTARUnknown:
-		return fail(db.JobFailed, "the card has no application at TAR %x: set the card's ADF RFM TAR", j.TAR)
+		return fail(db.JobFailed, "The card has no application at TAR %x: set the card's ADF RFM TAR.", j.TAR)
 	default:
 		if r.Unsecured {
-			return fail(db.JobFailed, "the card refused the command, in an unsecured PoR: %s", r.Status)
+			return fail(db.JobFailed, "The card refused the command, in an unsecured PoR: %s.", r.Status.Label())
 		}
 
-		return fail(db.JobFailed, "the card refused the command: %s", r.Status)
+		return fail(db.JobFailed, "The card refused the command: %s.", r.Status.Label())
 	}
 
 	rr, err := rfm.DecodeResponse(r.Data)
 	if err != nil {
-		return fail(db.JobFailed, "%v", err)
+		return fail(db.JobFailed, "%s", sentence(err))
 	}
 
 	j.StatusWord = int(rr.StatusWord)
 
 	script, err := Script(j)
 	if err != nil {
-		return fail(db.JobFailed, "%v", err)
+		return fail(db.JobFailed, "%s", sentence(err))
 	}
 
 	res, err := script.Check(rr)
@@ -782,11 +782,11 @@ func Outcome(j db.Job, r ota.Response, packet []byte) (db.Job, bool) {
 	var se *rfm.ScriptError
 	if errors.As(err, &se) && writes(j) && se.Executed == script.Len() {
 		// Every command up to the read-back ran; the update was applied.
-		return fail(db.JobUnconfirmed, "written, but the read-back failed: %v", err)
+		return fail(db.JobUnconfirmed, "Written, but the read-back failed: %v.", err)
 	}
 
 	if err != nil {
-		return fail(db.JobFailed, "%v", err)
+		return fail(db.JobFailed, "%s", sentence(err))
 	}
 
 	j.Warning = res.Warning
@@ -802,14 +802,14 @@ func advance(j db.Job, data []byte) (db.Job, bool) {
 	}
 
 	if writes(j) {
-		want, err := entryOf(j)
+		w, err := writeOf(j)
 		if err != nil {
-			return fail("%v", err)
+			return fail("%s", sentence(err))
 		}
 
 		j.Data = data
-		if !bytes.Equal(data, want) {
-			return fail("slot %d reads back %x, not the %x written", j.Slot, data, want)
+		if !bytes.Equal(data, w.data) {
+			return fail("%s reads back %s instead of %s.", w.what, w.contents(data), w.contents(w.data))
 		}
 
 		j.Status = db.JobSucceeded
@@ -820,17 +820,17 @@ func advance(j db.Job, data []byte) (db.Job, bool) {
 	if j.Step == 0 {
 		size, err := rfm.FileSize(data)
 		if err != nil {
-			return fail("%v", err)
+			return fail("%s", sentence(err))
 		}
 
 		if size%entryLength != 0 {
-			return fail("EF.OPLMNwAcT of %d octets is not a list of %d-octet entries", size, entryLength)
+			return fail("EF.OPLMNwAcT of %d octets is not a list of %d-octet entries.", size, entryLength)
 		}
 
 		j.FileSize, j.Data = size, nil
 	} else {
 		if want := chunkLength(j); len(data) != want {
-			return fail("read %d octets, not %d", len(data), want)
+			return fail("Read %d octets, not %d.", len(data), want)
 		}
 
 		j.Data = append(j.Data, data...)
@@ -850,6 +850,9 @@ func advance(j db.Job, data []byte) (db.Job, bool) {
 // to the USIM, where ADF.USIM is the current directory at the start (TS 102 226 clause 7.3):
 //
 //   - a set or a clear writes its slot of EF.OPLMNwAcT and reads it back;
+//   - an IMSI write writes the whole of EF.IMSI and reads it back, so that one PoR tells what the card holds. It sends
+//     no REFRESH and leaves the location files that TS 31.102 annex A, note 1, advises updating with EF.IMSI: the UE
+//     takes the IMSI at its next USIM initialisation;
 //   - a read first gets the file's FCP for its size, then reads the file in chunks of ReadChunk octets.
 func Script(j db.Job) (*rfm.Script, error) {
 	s := rfm.NewScript()
@@ -866,15 +869,13 @@ func Script(j db.Job) (*rfm.Script, error) {
 		}
 
 		return s.Select(rfm.FileOPLMNwAcT).ReadBinary(uint16((j.Step-1)*ReadChunk), uint8(n)), nil
-	case db.OperationOPLMNSet, db.OperationOPLMNClear:
-		entry, err := entryOf(j)
+	case db.OperationOPLMNSet, db.OperationOPLMNClear, db.OperationIMSIWrite:
+		w, err := writeOf(j)
 		if err != nil {
 			return nil, err
 		}
 
-		offset := rfm.SlotOffset(j.Slot)
-
-		return s.Select(rfm.FileOPLMNwAcT).UpdateBinary(offset, entry).ReadBinary(offset, entryLength), nil
+		return s.Select(w.file).UpdateBinary(w.offset, w.data).ReadBinary(w.offset, uint8(len(w.data))), nil
 	default:
 		return nil, fmt.Errorf("unknown operation %q", j.Operation)
 	}
@@ -885,10 +886,28 @@ func chunkLength(j db.Job) int {
 	return min(ReadChunk, j.FileSize-(j.Step-1)*ReadChunk)
 }
 
-// entryOf is the entry a set or a clear writes.
-func entryOf(j db.Job) ([]byte, error) {
+// write is what a write job writes, and reads back: data at offset of a transparent EF, named what.
+type write struct {
+	file   uint16
+	offset uint16
+	data   []byte
+	what   string
+}
+
+// writeOf is what a write job writes: for a set or a clear, its slot's entry of EF.OPLMNwAcT; for an IMSI write, the
+// whole of EF.IMSI, so that no octet of a former, longer IMSI is left behind.
+func writeOf(j db.Job) (write, error) {
+	if j.Operation == db.OperationIMSIWrite {
+		ef, err := rfm.EncodeIMSI(j.IMSI)
+		if err != nil {
+			return write{}, err
+		}
+
+		return write{file: rfm.FileIMSI, data: ef, what: "EF.IMSI"}, nil
+	}
+
 	if j.Slot < 1 || j.Slot > MaxSlot {
-		return nil, fmt.Errorf("slot %d not in 1-%d", j.Slot, MaxSlot)
+		return write{}, fmt.Errorf("slot %d not in 1-%d", j.Slot, MaxSlot)
 	}
 
 	e := rfm.Empty
@@ -896,12 +915,69 @@ func entryOf(j db.Job) ([]byte, error) {
 		e = rfm.SelectorEntry{MCC: j.MCC, MNC: j.MNC, Access: rfm.AccessTechnology(j.Access)}
 	}
 
-	return e.Encode()
+	entry, err := e.Encode()
+	if err != nil {
+		return write{}, err
+	}
+
+	return write{file: rfm.FileOPLMNwAcT, offset: rfm.SlotOffset(j.Slot), data: entry, what: fmt.Sprintf("Slot %d", j.Slot)}, nil
+}
+
+// contents is what b, of the octets that w writes, holds in words: an IMSI's digits, or an entry's PLMN as MCC/MNC and
+// its access technologies; in hex when it does not decode.
+func (w write) contents(b []byte) string {
+	if w.file == rfm.FileIMSI {
+		if imsi, err := rfm.DecodeIMSI(b); err == nil {
+			return imsi
+		}
+
+		return fmt.Sprintf("%x", b)
+	}
+
+	es, err := rfm.DecodeSelector(b)
+	if err != nil || len(es) != 1 {
+		return fmt.Sprintf("%x", b)
+	}
+
+	if es[0] == rfm.Empty {
+		return "an empty entry"
+	}
+
+	var labels []string
+	for _, n := range es[0].Access.Names() {
+		labels = append(labels, rfm.AccessLabels[n])
+	}
+
+	access := strings.Join(labels, ", ")
+	if access == "" {
+		access = "none"
+	}
+
+	return fmt.Sprintf("%s/%s (%s)", es[0].MCC, es[0].MNC, access)
+}
+
+// sentence is err as a sentence of a job's error.
+func sentence(err error) string {
+	return asSentence(err.Error())
+}
+
+// asSentence is a job's error as a sentence: capitalised, with a full stop.
+func asSentence(s string) string {
+	if s == "" {
+		return s
+	}
+
+	s = strings.ToUpper(s[:1]) + s[1:]
+	if !strings.HasSuffix(s, ".") {
+		s += "."
+	}
+
+	return s
 }
 
 // fail fails a queued job, for the runner, which logs a failure to store it: the job stays queued and is tried again.
 func (r *Runner) fail(ctx context.Context, j db.Job, reason string) {
-	j.Status, j.Error = db.JobFailed, reason
+	j.Status, j.Error = db.JobFailed, asSentence(reason)
 	if err := r.finish(ctx, j); err != nil {
 		r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
 	}
