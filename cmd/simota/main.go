@@ -121,7 +121,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	srv := &http.Server{
 		Addr: addr,
 		Handler: api.NewHandler(api.Config{
-			Store: store, Frontend: ui.FS(), Version: version, Notify: runner.Wake, Gateway: gw, Logger: logger,
+			Store: store, Frontend: ui.FS(), Version: version, Notify: runner.Wake, Gateway: gw, Ready: store.Ping,
+			Logger: logger,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -124,6 +124,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	return d, nil
 }
 
+// Ping tells whether the database answers.
+func (d *DB) Ping(ctx context.Context) error {
+	return d.conn.PingContext(ctx)
+}
+
 func (d *DB) Close() error {
 	return d.conn.Close()
 }

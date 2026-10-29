@@ -549,3 +549,18 @@ func TestSMSC(t *testing.T) {
 		}
 	}
 }
+
+func TestPing(t *testing.T) {
+	d, _ := open(t)
+	if err := d.Ping(context.Background()); err != nil {
+		t.Fatalf("ping = %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.Ping(context.Background()); err == nil {
+		t.Fatal("ping after close succeeded")
+	}
+}

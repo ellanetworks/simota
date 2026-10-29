@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -423,5 +424,51 @@ func TestUpdateKeySetCounter(t *testing.T) {
 		if code, b := e.do(t, http.MethodPut, tc.path, "application/json", tc.body); code != tc.code {
 			t.Fatalf("PUT %s %s = %d %s, want %d", tc.path, tc.body, code, b, tc.code)
 		}
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	var notReady error
+
+	srv := httptest.NewServer(api.NewHandler(api.Config{
+		Ready:  func(context.Context) error { return notReady },
+		Logger: slog.New(slog.DiscardHandler),
+	}))
+	t.Cleanup(srv.Close)
+
+	get := func(path string) (int, string) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		defer func() { _ = resp.Body.Close() }()
+
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return resp.StatusCode, string(b)
+	}
+
+	if code, _ := get("/api/v1/readyz"); code != http.StatusNoContent {
+		t.Fatalf("ready: code = %d", code)
+	}
+
+	notReady = errors.New("database is closed")
+
+	if code, body := get("/api/v1/readyz"); code != http.StatusServiceUnavailable || body != `{"error":"Not ready"}` {
+		t.Fatalf("not ready = %d %s", code, body)
+	}
+
+	// Liveness does not depend on readiness.
+	if code, _ := get("/api/v1/livez"); code != http.StatusNoContent {
+		t.Fatalf("livez while not ready: code = %d", code)
 	}
 }
