@@ -4,7 +4,7 @@
   <img src="docs/images/logo.svg" alt="Ella SIM OTA" width="120"/>
 </p>
 
-**Ella SIM OTA** updates the SIM cards of a 4G or 5G network over the air. It sends secured commands to the cards through any SMSC over SMPP, and reports what each card answered. The binary and the container image are `simota`.
+**Ella SIM OTA** updates the SIM cards of a 4G or 5G network over the air. It sends secured commands to the cards through any SMSC over SMPP, and reports what each card answered.
 
 ## Key Features
 
