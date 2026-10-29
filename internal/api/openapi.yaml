@@ -386,6 +386,12 @@ paths:
       responses:
         "204":
           description: simota serves requests.
+        "503":
+          description: simota cannot serve requests, such as when its database does not answer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/v1/openapi.yaml:
     get:

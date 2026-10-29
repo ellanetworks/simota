@@ -38,6 +38,8 @@ type Config struct {
 	Version  string
 	// Notify, when set, tells the job runner that jobs are queued or the SMSC changed.
 	Notify func()
+	// Ready, when set, tells whether simota can serve requests: nil, or what is wrong.
+	Ready func(ctx context.Context) error
 	// Gateway, when set, is the SMPP session to the SMSC: PUT /api/v1/smsc applies its settings, GET shows its state.
 	Gateway Gateway
 	Logger  *slog.Logger
@@ -63,7 +65,7 @@ func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /api/v1/livez", Livez())
-	mux.Handle("GET /api/v1/readyz", Readyz())
+	mux.Handle("GET /api/v1/readyz", Readyz(cfg))
 	mux.Handle("GET /api/v1/status", GetStatus(cfg))
 	mux.Handle("GET /api/v1/openapi.yaml", OpenAPISpec())
 	mux.Handle("GET /api/v1/cards", ListCards(cfg))
@@ -86,16 +88,26 @@ func NewHandler(cfg Config) http.Handler {
 	return mux
 }
 
-// Livez tells the kubelet that the process serves HTTP.
+// Livez tells the kubelet that the process serves HTTP. It checks nothing else, so that a failing database fails
+// readiness and does not restart simota.
 func Livez() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
-// Readyz tells whether simota can serve requests. It has no dependency to wait for once it listens.
-func Readyz() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// Readyz tells whether simota can serve requests: 204 when cfg.Ready finds nothing wrong, 503 otherwise.
+func Readyz(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cfg.Ready != nil {
+			if err := cfg.Ready(r.Context()); err != nil {
+				cfg.Logger.Warn("not ready", slog.Any("error", err))
+				writeJSON(w, ErrorResponse{Error: "Not ready"}, http.StatusServiceUnavailable, cfg.Logger)
+
+				return
+			}
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
