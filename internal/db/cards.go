@@ -49,6 +49,7 @@ var ErrCounterExhausted = errors.New("key set counter exhausted")
 // CreateCard stores a new card with its key sets.
 func (d *DB) CreateCard(ctx context.Context, c Card) (err error) {
 	ctx, span := d.start(ctx, opCreateCard)
+
 	defer func() { end(span, err) }()
 
 	return d.tx(ctx, func(tx *sql.Tx) error {
@@ -72,6 +73,7 @@ func (d *DB) CreateCard(ctx context.Context, c Card) (err error) {
 // so that no two commands share a counter.
 func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint64, err error) {
 	ctx, span := d.start(ctx, opNextCounter)
+
 	defer func() { end(span, err) }()
 
 	var counter uint64
@@ -102,6 +104,7 @@ func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint
 // UpdateCard updates the settings of a card, not its key sets.
 func (d *DB) UpdateCard(ctx context.Context, c Card) (err error) {
 	ctx, span := d.start(ctx, opUpdateCard)
+
 	defer func() { end(span, err) }()
 
 	res, err := d.conn.ExecContext(ctx, `UPDATE cards SET imsi = ?, msisdn = ?, description = ?, tar = ?, kvn = ?,
@@ -115,6 +118,7 @@ func (d *DB) UpdateCard(ctx context.Context, c Card) (err error) {
 
 func (d *DB) DeleteCard(ctx context.Context, iccid string) (err error) {
 	ctx, span := d.start(ctx, opDeleteCard)
+
 	defer func() { end(span, err) }()
 
 	res, err := d.conn.ExecContext(ctx, "DELETE FROM cards WHERE iccid = ?", iccid)
@@ -127,6 +131,7 @@ func (d *DB) DeleteCard(ctx context.Context, iccid string) (err error) {
 
 func (d *DB) GetCard(ctx context.Context, iccid string) (_ Card, err error) {
 	ctx, span := d.start(ctx, opGetCard)
+
 	defer func() { end(span, err) }()
 
 	cards, err := d.cards(ctx, "WHERE iccid = ?", iccid)
@@ -144,6 +149,7 @@ func (d *DB) GetCard(ctx context.Context, iccid string) (_ Card, err error) {
 // ListCards lists a page, from 1, of the cards by ICCID, and the number of cards.
 func (d *DB) ListCards(ctx context.Context, page, perPage int) (_ []Card, _ int, err error) {
 	ctx, span := d.start(ctx, opListCards)
+
 	defer func() { end(span, err) }()
 
 	var total int
@@ -161,6 +167,7 @@ func (d *DB) ListCards(ctx context.Context, page, perPage int) (_ []Card, _ int,
 // that key set; otherwise its first one.
 func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated int, err error) {
 	ctx, span := d.start(ctx, opImportCards)
+
 	defer func() { end(span, err) }()
 
 	err = d.tx(ctx, func(tx *sql.Tx) error {
@@ -331,6 +338,7 @@ func affected(res sql.Result) error {
 // A card does not tell its counter (TS 102 225 clause 5.1.4).
 func (d *DB) SetCounter(ctx context.Context, iccid string, version int, counter uint64) (err error) {
 	ctx, span := d.start(ctx, opSetCounter)
+
 	defer func() { end(span, err) }()
 
 	if counter > maxCounter {

@@ -86,6 +86,7 @@ func (d *DB) CreateJobs(ctx context.Context, jobs []Job) (_ []int64, err error) 
 	traceparent := traceParent(ctx)
 
 	ctx, span := d.start(ctx, opCreateJobs)
+
 	defer func() { end(span, err) }()
 
 	ids := make([]int64, 0, len(jobs))
@@ -150,6 +151,7 @@ func (d *DB) CreateJobs(ctx context.Context, jobs []Job) (_ []int64, err error) 
 
 func (d *DB) GetJob(ctx context.Context, id int64) (_ Job, err error) {
 	ctx, span := d.start(ctx, opGetJob)
+
 	defer func() { end(span, err) }()
 
 	jobs, err := d.jobs(ctx, "WHERE id = ?", id)
@@ -168,6 +170,7 @@ func (d *DB) GetJob(ctx context.Context, id int64) (_ Job, err error) {
 // and their number.
 func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) (_ []Job, _ int, err error) {
 	ctx, span := d.start(ctx, opListJobs)
+
 	defer func() { end(span, err) }()
 
 	where, args := "", []any{}
@@ -191,6 +194,7 @@ func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) (_ 
 // JobsIn lists the jobs in a status, oldest first.
 func (d *DB) JobsIn(ctx context.Context, status JobStatus, limit int) (_ []Job, err error) {
 	ctx, span := d.start(ctx, opJobsIn)
+
 	defer func() { end(span, err) }()
 
 	return d.jobs(ctx, "WHERE status = ? ORDER BY id LIMIT ?", status, limit)
@@ -199,6 +203,7 @@ func (d *DB) JobsIn(ctx context.Context, status JobStatus, limit int) (_ []Job, 
 // SentJob is the job whose current command went to the SMSC as message messageID, or ErrNotFound.
 func (d *DB) SentJob(ctx context.Context, messageID string) (_ Job, err error) {
 	ctx, span := d.start(ctx, opSentJob)
+
 	defer func() { end(span, err) }()
 
 	return d.oneJob(ctx, "WHERE status = 'sent' AND message_id = ?", messageID)
@@ -211,6 +216,7 @@ const maxAwaiting = 10
 // answer: those sent, and those closed without its PoR. The PoR's counter tells which, if any, it answers.
 func (d *DB) AwaitingPoR(ctx context.Context, msisdn string, tar []byte) (_ []Job, err error) {
 	ctx, span := d.start(ctx, opAwaitingPoR)
+
 	defer func() { end(span, err) }()
 
 	return d.jobs(ctx, `WHERE tar = ? AND (status = 'sent' OR por_missing = 1)
@@ -236,6 +242,7 @@ func (d *DB) MarkJobSent(ctx context.Context, id int64, counter uint64, messageI
 	traceparent := traceParent(ctx)
 
 	ctx, span := d.start(ctx, opMarkJobSent)
+
 	defer func() { end(span, err) }()
 
 	res, err := d.conn.ExecContext(ctx, `UPDATE jobs SET status = 'sent', counter = ?, message_id = ?, command = ?,
@@ -251,6 +258,7 @@ func (d *DB) MarkJobSent(ctx context.Context, id int64, counter uint64, messageI
 // AdvanceJob records the answer to a sent job's command, and queues its next command.
 func (d *DB) AdvanceJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opAdvanceJob)
+
 	defer func() { end(span, err) }()
 
 	res, err := d.conn.ExecContext(ctx, `UPDATE jobs SET status = 'queued', step = ?, file_size = ?, response = ?,
@@ -267,6 +275,7 @@ func (d *DB) AdvanceJob(ctx context.Context, j Job) (err error) {
 // CountAttempt counts a failed submit of a queued job's current command, and returns how many there were.
 func (d *DB) CountAttempt(ctx context.Context, id int64) (_ int, err error) {
 	ctx, span := d.start(ctx, opCountAttempt)
+
 	defer func() { end(span, err) }()
 
 	var n int
@@ -287,6 +296,7 @@ func (d *DB) CountAttempt(ctx context.Context, id int64) (_ int, err error) {
 // IMSI the card's IMSI on record; one that fails or is unconfirmed leaves it, since the card may still hold it.
 func (d *DB) FinishJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opFinishJob)
+
 	defer func() { end(span, err) }()
 
 	return d.finish(ctx, j, "status IN ('queued', 'sent')")
@@ -298,6 +308,7 @@ func (d *DB) FinishJob(ctx context.Context, j Job) (err error) {
 // tells the card's IMSI.
 func (d *DB) ReviseJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opFinishJob)
+
 	defer func() { end(span, err) }()
 
 	return d.finish(ctx, j, "por_missing = 1 AND counter = ?", int64(j.Counter))

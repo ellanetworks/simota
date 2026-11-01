@@ -24,6 +24,7 @@ type SMSC struct {
 // GetSMSC is the SMSC, or ErrNotFound before one is set.
 func (d *DB) GetSMSC(ctx context.Context) (_ SMSC, err error) {
 	ctx, span := d.start(ctx, opGetSMSC)
+
 	defer func() { end(span, err) }()
 
 	var (
@@ -49,6 +50,7 @@ func (d *DB) GetSMSC(ctx context.Context) (_ SMSC, err error) {
 // PutSMSC sets the SMSC, and returns it as stored. An empty password keeps the one set.
 func (d *DB) PutSMSC(ctx context.Context, s SMSC) (_ SMSC, err error) {
 	ctx, span := d.start(ctx, opPutSMSC)
+
 	defer func() { end(span, err) }()
 
 	err = d.tx(ctx, func(tx *sql.Tx) error {
