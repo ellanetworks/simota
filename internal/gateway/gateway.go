@@ -14,7 +14,11 @@ import (
 	"time"
 
 	"github.com/ellanetworks/simota/internal/db"
+	"github.com/ellanetworks/simota/internal/tracing"
 	"github.com/ellanetworks/smsc/smpp"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // closeTimeout bounds the unbind of a session being replaced.
@@ -61,12 +65,17 @@ type State struct {
 type Config struct {
 	// Handler handles the SMSC's deliver_sm: delivery receipts and SIM answers.
 	Handler smpp.Handler
-	Logger  *slog.Logger
+	// TracerProvider, when set, traces the submit_sm made within a caller's span.
+	TracerProvider trace.TracerProvider
+	Logger         *slog.Logger
 }
+
+const tracerName = "github.com/ellanetworks/simota/internal/gateway"
 
 // Gateway is the session to the SMSC. It is safe for concurrent use.
 type Gateway struct {
-	cfg Config
+	cfg    Config
+	tracer trace.Tracer
 
 	mu       sync.Mutex
 	settings *Settings
@@ -79,12 +88,18 @@ func New(cfg Config) *Gateway {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
 
-	return &Gateway{cfg: cfg, since: time.Now()}
+	tp := cfg.TracerProvider
+	if tp == nil {
+		tp = noop.NewTracerProvider()
+	}
+
+	return &Gateway{cfg: cfg, tracer: tp.Tracer(tracerName, trace.WithSchemaURL(semconv.SchemaURL)), since: time.Now()}
 }
 
 // Apply connects with s, after unbinding a session with other settings, or disconnects when s is nil. Settings
-// equal to those in use change nothing.
-func (g *Gateway) Apply(s *Settings) error {
+// equal to those in use change nothing. The unbind is part of the change that ctx makes, but is not cut short when
+// ctx ends: it is bounded by closeTimeout, so that the SMSC sees the session go.
+func (g *Gateway) Apply(ctx context.Context, s *Settings) error {
 	g.mu.Lock()
 
 	if s != nil && g.settings != nil && *s == *g.settings {
@@ -110,7 +125,7 @@ func (g *Gateway) Apply(s *Settings) error {
 	g.mu.Unlock()
 
 	if old != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 		defer cancel()
 
 		_ = old.Close(ctx)
@@ -138,11 +153,33 @@ func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
 	})
 }
 
-// SubmitSM submits a short message and returns its message_id, or smpp.ErrNoSession while not bound.
-func (g *Gateway) SubmitSM(ctx context.Context, m *smpp.SubmitSM) (string, error) {
+// SubmitSM submits a short message and returns its message_id, or smpp.ErrNoSession while not bound. Within a
+// caller's span, it is a client span of the RPC conventions, submit_sm, to the SMSC as set.
+func (g *Gateway) SubmitSM(ctx context.Context, m *smpp.SubmitSM) (id string, err error) {
 	g.mu.Lock()
-	c := g.client
+	c, s := g.client, g.settings
 	g.mu.Unlock()
+
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		attrs := tracing.SMPPAttributes(smpp.CmdSubmitSM)
+		if s != nil {
+			attrs = append(attrs, semconv.ServerAddress(s.Host), semconv.ServerPort(s.Port))
+		}
+
+		var span trace.Span
+
+		ctx, span = g.tracer.Start(ctx, smpp.CmdSubmitSM.String(), trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(attrs...))
+
+		defer func() {
+			var status *smpp.CommandStatus
+			if err == nil {
+				status = new(smpp.StatusOK)
+			}
+
+			tracing.EndSMPP(span, status, err)
+		}()
+	}
 
 	if c == nil {
 		return "", smpp.ErrNoSession

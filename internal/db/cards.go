@@ -47,7 +47,10 @@ const maxCounter = 1<<40 - 1
 var ErrCounterExhausted = errors.New("key set counter exhausted")
 
 // CreateCard stores a new card with its key sets.
-func (d *DB) CreateCard(ctx context.Context, c Card) error {
+func (d *DB) CreateCard(ctx context.Context, c Card) (err error) {
+	ctx, span := d.start(ctx, opCreateCard)
+	defer func() { end(span, err) }()
+
 	return d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.now().UnixMilli()
 
@@ -67,14 +70,23 @@ func (d *DB) CreateCard(ctx context.Context, c Card) error {
 
 // NextCounter takes the next counter of a card's key set: one more than the last one sent, stored before it is used,
 // so that no two commands share a counter.
-func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (uint64, error) {
+func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint64, err error) {
+	ctx, span := d.start(ctx, opNextCounter)
+	defer func() { end(span, err) }()
+
 	var counter uint64
 
-	err := d.conn.QueryRowContext(ctx, `UPDATE key_sets SET counter = counter + 1 WHERE iccid = ? AND version = ?
+	err = d.conn.QueryRowContext(ctx, `UPDATE key_sets SET counter = counter + 1 WHERE iccid = ? AND version = ?
 		AND counter < ? RETURNING counter`, iccid, version, maxCounter).Scan(&counter)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, gerr := d.GetCard(ctx, iccid); gerr != nil {
+		// The card is gone, or its key set's counter is exhausted.
+		cards, gerr := d.cards(ctx, "WHERE iccid = ?", iccid)
+		if gerr != nil {
 			return 0, gerr
+		}
+
+		if len(cards) == 0 {
+			return 0, ErrNotFound
 		}
 
 		return 0, ErrCounterExhausted
@@ -88,7 +100,10 @@ func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (uint64
 }
 
 // UpdateCard updates the settings of a card, not its key sets.
-func (d *DB) UpdateCard(ctx context.Context, c Card) error {
+func (d *DB) UpdateCard(ctx context.Context, c Card) (err error) {
+	ctx, span := d.start(ctx, opUpdateCard)
+	defer func() { end(span, err) }()
+
 	res, err := d.conn.ExecContext(ctx, `UPDATE cards SET imsi = ?, msisdn = ?, description = ?, tar = ?, kvn = ?,
 		updated_at = ? WHERE iccid = ?`, nullString(c.IMSI), c.MSISDN, c.Description, c.TAR, c.KVN, d.now().UnixMilli(), c.ICCID)
 	if err != nil {
@@ -98,7 +113,10 @@ func (d *DB) UpdateCard(ctx context.Context, c Card) error {
 	return affected(res)
 }
 
-func (d *DB) DeleteCard(ctx context.Context, iccid string) error {
+func (d *DB) DeleteCard(ctx context.Context, iccid string) (err error) {
+	ctx, span := d.start(ctx, opDeleteCard)
+	defer func() { end(span, err) }()
+
 	res, err := d.conn.ExecContext(ctx, "DELETE FROM cards WHERE iccid = ?", iccid)
 	if err != nil {
 		return fmt.Errorf("delete card: %w", err)
@@ -107,7 +125,10 @@ func (d *DB) DeleteCard(ctx context.Context, iccid string) error {
 	return affected(res)
 }
 
-func (d *DB) GetCard(ctx context.Context, iccid string) (Card, error) {
+func (d *DB) GetCard(ctx context.Context, iccid string) (_ Card, err error) {
+	ctx, span := d.start(ctx, opGetCard)
+	defer func() { end(span, err) }()
+
 	cards, err := d.cards(ctx, "WHERE iccid = ?", iccid)
 	if err != nil {
 		return Card{}, err
@@ -121,7 +142,10 @@ func (d *DB) GetCard(ctx context.Context, iccid string) (Card, error) {
 }
 
 // ListCards lists a page, from 1, of the cards by ICCID, and the number of cards.
-func (d *DB) ListCards(ctx context.Context, page, perPage int) ([]Card, int, error) {
+func (d *DB) ListCards(ctx context.Context, page, perPage int) (_ []Card, _ int, err error) {
+	ctx, span := d.start(ctx, opListCards)
+	defer func() { end(span, err) }()
+
 	var total int
 	if err := d.conn.QueryRowContext(ctx, "SELECT count(*) FROM cards").Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count cards: %w", err)
@@ -136,6 +160,9 @@ func (d *DB) ListCards(ctx context.Context, page, perPage int) ([]Card, int, err
 // file has one, and key sets of the file, keeping its MSISDN, description, TAR, counters, and key set choice when the file still has
 // that key set; otherwise its first one.
 func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated int, err error) {
+	ctx, span := d.start(ctx, opImportCards)
+	defer func() { end(span, err) }()
+
 	err = d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.now().UnixMilli()
 
@@ -302,7 +329,10 @@ func affected(res sql.Result) error {
 
 // SetCounter sets the counter of a card's key set: the last CNTR the card accepted, when the card was used elsewhere.
 // A card does not tell its counter (TS 102 225 clause 5.1.4).
-func (d *DB) SetCounter(ctx context.Context, iccid string, version int, counter uint64) error {
+func (d *DB) SetCounter(ctx context.Context, iccid string, version int, counter uint64) (err error) {
+	ctx, span := d.start(ctx, opSetCounter)
+	defer func() { end(span, err) }()
+
 	if counter > maxCounter {
 		return fmt.Errorf("set counter: %d exceeds 5 octets", counter)
 	}

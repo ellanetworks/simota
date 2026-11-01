@@ -61,6 +61,9 @@ db:
 api:
   address: 127.0.0.1
   port: 5020
+telemetry:
+  enabled: true
+  otlp_endpoint: localhost:4317
 ```
 
 The UI and the API (`/api/v1`, described at `/api/v1/openapi.yaml`) have no authentication yet: restrict who can reach them.

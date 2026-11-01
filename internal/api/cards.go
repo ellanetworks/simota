@@ -93,7 +93,7 @@ func ListCards(cfg Config) http.Handler {
 
 		cards, total, err := cfg.Store.ListCards(r.Context(), page, perPage)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to list cards", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to list cards", err, cfg.Logger)
 			return
 		}
 
@@ -102,7 +102,7 @@ func ListCards(cfg Config) http.Handler {
 			items = append(items, cardResponse(c))
 		}
 
-		writeResponse(w, ListCardsResponse{Items: items, Page: page, PerPage: perPage, TotalCount: total}, http.StatusOK, cfg.Logger)
+		writeResponse(w, r, ListCardsResponse{Items: items, Page: page, PerPage: perPage, TotalCount: total}, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -110,16 +110,16 @@ func GetCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := cfg.Store.GetCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
+			writeError(w, r, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, cardResponse(c), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, cardResponse(c), http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -132,28 +132,28 @@ func CreateCard(cfg Config) http.Handler {
 
 		c, err := p.card()
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
 		}
 
 		err = cfg.Store.CreateCard(r.Context(), c)
 		if errors.Is(err, db.ErrAlreadyExists) {
-			writeError(w, http.StatusConflict, "A card with this ICCID already exists", err, cfg.Logger)
+			writeError(w, r, http.StatusConflict, "A card with this ICCID already exists", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to create card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to create card", err, cfg.Logger)
 			return
 		}
 
 		created, err := cfg.Store.GetCard(r.Context(), c.ICCID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, cardResponse(created), http.StatusCreated, cfg.Logger)
+		writeResponse(w, r, cardResponse(created), http.StatusCreated, cfg.Logger)
 	})
 }
 
@@ -166,39 +166,39 @@ func UpdateCard(cfg Config) http.Handler {
 
 		c, err := cfg.Store.GetCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
+			writeError(w, r, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 			return
 		}
 
 		c.IMSI, c.MSISDN, c.Description, c.KVN = p.IMSI, p.MSISDN, p.Description, p.KVN
 
 		if c.TAR, err = parseTAR(p.TAR); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
 		}
 
 		if err := validate(c); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
 		}
 
 		if err := cfg.Store.UpdateCard(r.Context(), c); err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to update card", err, cfg.Logger)
 			return
 		}
 
 		updated, err := cfg.Store.GetCard(r.Context(), c.ICCID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, cardResponse(updated), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, cardResponse(updated), http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -206,16 +206,16 @@ func DeleteCard(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		err := cfg.Store.DeleteCard(r.Context(), cardfile.NormalICCID(r.PathValue("iccid")))
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "Card not found", err, cfg.Logger)
+			writeError(w, r, http.StatusNotFound, "Card not found", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to delete card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to delete card", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, SuccessResponse{Message: "Card deleted successfully"}, http.StatusOK, cfg.Logger)
+		writeResponse(w, r, SuccessResponse{Message: "Card deleted successfully"}, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -227,19 +227,19 @@ func ImportCards(cfg Config) http.Handler {
 
 		algorithm := q.Get("algorithm")
 		if algorithm != "3des" && algorithm != "aes" {
-			writeError(w, http.StatusBadRequest, "algorithm must be 3des or aes", nil, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "algorithm must be 3des or aes", nil, cfg.Logger)
 			return
 		}
 
 		ccLength, ok := atoiDefault(q.Get("cc_length"), 8)
 		if !ok || (ccLength != 8 && (algorithm != "aes" || ccLength != 4)) {
-			writeError(w, http.StatusBadRequest, "cc_length must be 8, or 4 for aes", nil, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "cc_length must be 8, or 4 for aes", nil, cfg.Logger)
 			return
 		}
 
 		parsed, err := cardfile.Parse(http.MaxBytesReader(w, r.Body, maxImportBody), algorithm)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
 		}
 
@@ -256,11 +256,11 @@ func ImportCards(cfg Config) http.Handler {
 
 		created, updated, err := cfg.Store.ImportCards(r.Context(), cards)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to import cards", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to import cards", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, ImportCardsResponse{Created: created, Updated: updated}, http.StatusOK, cfg.Logger)
+		writeResponse(w, r, ImportCardsResponse{Created: created, Updated: updated}, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -407,12 +407,12 @@ func UpdateKeySet(cfg Config) http.Handler {
 
 		version, err := strconv.Atoi(r.PathValue("version"))
 		if err != nil || version < 1 || version > 15 {
-			writeError(w, http.StatusBadRequest, "Invalid key set version", err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "Invalid key set version", err, cfg.Logger)
 			return
 		}
 
 		if p.Counter == nil || *p.Counter > maxCounter {
-			writeError(w, http.StatusBadRequest, "counter must be between 0 and 1099511627775", nil, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "counter must be between 0 and 1099511627775", nil, cfg.Logger)
 			return
 		}
 
@@ -420,22 +420,22 @@ func UpdateKeySet(cfg Config) http.Handler {
 
 		err = cfg.Store.SetCounter(r.Context(), iccid, version, *p.Counter)
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "Key set not found", err, cfg.Logger)
+			writeError(w, r, http.StatusNotFound, "Key set not found", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update the key set", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to update the key set", err, cfg.Logger)
 			return
 		}
 
 		c, err := cfg.Store.GetCard(r.Context(), iccid)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, cardResponse(c), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, cardResponse(c), http.StatusOK, cfg.Logger)
 	})
 }
 

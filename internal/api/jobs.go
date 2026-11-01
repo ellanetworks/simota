@@ -104,26 +104,26 @@ func CreateJobs(cfg Config) http.Handler {
 
 		template, err := p.job()
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, err.Error(), err, cfg.Logger)
 			return
 		}
 
 		if _, err := cfg.Store.GetSMSC(r.Context()); errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusConflict, "Set the SMSC before creating jobs", err, cfg.Logger)
+			writeError(w, r, http.StatusConflict, "Set the SMSC before creating jobs", err, cfg.Logger)
 			return
 		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
 			return
 		}
 
 		if len(p.ICCIDs) == 0 || len(p.ICCIDs) > maxJobCards {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("iccids must hold 1 to %d cards", maxJobCards), nil, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, fmt.Sprintf("iccids must hold 1 to %d cards", maxJobCards), nil, cfg.Logger)
 			return
 		}
 
 		// An IMSI is a single subscription's: it is written to one card.
 		if template.Operation == db.OperationIMSIWrite && len(p.ICCIDs) != 1 {
-			writeError(w, http.StatusBadRequest, "An IMSI write takes one card", nil, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "An IMSI write takes one card", nil, cfg.Logger)
 			return
 		}
 
@@ -132,7 +132,7 @@ func CreateJobs(cfg Config) http.Handler {
 
 		for _, iccid := range p.ICCIDs {
 			if seen[iccid] {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("Card %s is given twice", iccid), nil, cfg.Logger)
+				writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Card %s is given twice", iccid), nil, cfg.Logger)
 				return
 			}
 
@@ -140,22 +140,22 @@ func CreateJobs(cfg Config) http.Handler {
 
 			c, err := cfg.Store.GetCard(r.Context(), iccid)
 			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("Card %s not found", iccid), err, cfg.Logger)
+				writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Card %s not found", iccid), err, cfg.Logger)
 				return
 			}
 
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
+				writeError(w, r, http.StatusInternalServerError, "Failed to get card", err, cfg.Logger)
 				return
 			}
 
 			if c.MSISDN == "" {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("Card %s has no MSISDN", iccid), nil, cfg.Logger)
+				writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Card %s has no MSISDN", iccid), nil, cfg.Logger)
 				return
 			}
 
 			if template.Operation == db.OperationIMSIWrite && c.IMSI == "" {
-				writeError(w, http.StatusConflict, fmt.Sprintf("Card %s has no IMSI on record: set the IMSI it holds first",
+				writeError(w, r, http.StatusConflict, fmt.Sprintf("Card %s has no IMSI on record: set the IMSI it holds first",
 					iccid), nil, cfg.Logger)
 
 				return
@@ -168,18 +168,23 @@ func CreateJobs(cfg Config) http.Handler {
 
 		ids, err := cfg.Store.CreateJobs(r.Context(), batch)
 		if errors.Is(err, db.ErrBusy) {
-			writeError(w, http.StatusConflict, "A card has a job in progress", err, cfg.Logger)
+			writeError(w, r, http.StatusConflict, "A card has a job in progress", err, cfg.Logger)
 			return
 		}
 
 		if errors.Is(err, db.ErrIMSIMismatch) {
-			writeError(w, http.StatusConflict, "previous_imsi is not the card's IMSI on record", err, cfg.Logger)
+			writeError(w, r, http.StatusConflict, "previous_imsi is not the card's IMSI on record", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to create jobs", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to create jobs", err, cfg.Logger)
 			return
+		}
+
+		// The jobs are queued: the runner sends them though the response below fails, or the client goes away.
+		if cfg.Notify != nil {
+			cfg.Notify()
 		}
 
 		resp := JobsResponse{Items: make([]Job, 0, len(ids))}
@@ -187,18 +192,14 @@ func CreateJobs(cfg Config) http.Handler {
 		for _, id := range ids {
 			j, err := cfg.Store.GetJob(r.Context(), id)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "Failed to get job", err, cfg.Logger)
+				writeError(w, r, http.StatusInternalServerError, "Failed to get job", err, cfg.Logger)
 				return
 			}
 
 			resp.Items = append(resp.Items, jobResponse(j))
 		}
 
-		if cfg.Notify != nil {
-			cfg.Notify()
-		}
-
-		writeResponse(w, resp, http.StatusCreated, cfg.Logger)
+		writeResponse(w, r, resp, http.StatusCreated, cfg.Logger)
 	})
 }
 
@@ -211,7 +212,7 @@ func ListJobs(cfg Config) http.Handler {
 
 		list, total, err := cfg.Store.ListJobs(r.Context(), r.URL.Query().Get("search"), page, perPage)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to list jobs", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to list jobs", err, cfg.Logger)
 			return
 		}
 
@@ -220,7 +221,7 @@ func ListJobs(cfg Config) http.Handler {
 			resp.Items = append(resp.Items, jobResponse(j))
 		}
 
-		writeResponse(w, resp, http.StatusOK, cfg.Logger)
+		writeResponse(w, r, resp, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -228,22 +229,22 @@ func GetJob(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid job ID", err, cfg.Logger)
+			writeError(w, r, http.StatusBadRequest, "Invalid job ID", err, cfg.Logger)
 			return
 		}
 
 		j, err := cfg.Store.GetJob(r.Context(), id)
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "Job not found", err, cfg.Logger)
+			writeError(w, r, http.StatusNotFound, "Job not found", err, cfg.Logger)
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get job", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get job", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, jobResponse(j), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, jobResponse(j), http.StatusOK, cfg.Logger)
 	})
 }
 

@@ -15,9 +15,10 @@ import (
 const defaultAPIPort = 5020
 
 type Config struct {
-	Logging Logging `yaml:"logging"`
-	DB      DB      `yaml:"db"`
-	API     API     `yaml:"api"`
+	Logging   Logging   `yaml:"logging"`
+	DB        DB        `yaml:"db"`
+	API       API       `yaml:"api"`
+	Telemetry Telemetry `yaml:"telemetry"`
 }
 
 type Logging struct {
@@ -32,6 +33,12 @@ type DB struct {
 type API struct {
 	Address netip.Addr `yaml:"address"`
 	Port    int        `yaml:"port"`
+}
+
+// Telemetry exports traces over OTLP/gRPC to OTLPEndpoint, a host:port, when Enabled.
+type Telemetry struct {
+	Enabled      bool   `yaml:"enabled"`
+	OTLPEndpoint string `yaml:"otlp_endpoint"`
 }
 
 func Load(path string) (Config, error) {
@@ -67,6 +74,8 @@ func (c Config) validate() error {
 		return errors.New("api.address is required")
 	case c.API.Port < 1 || c.API.Port > 65535:
 		return fmt.Errorf("api.port %d is out of range", c.API.Port)
+	case c.Telemetry.Enabled && c.Telemetry.OTLPEndpoint == "":
+		return errors.New("telemetry.otlp_endpoint is required when telemetry.enabled is true")
 	}
 
 	return nil

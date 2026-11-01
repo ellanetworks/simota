@@ -87,7 +87,7 @@ func TestGateway(t *testing.T) {
 	}
 
 	s := gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "secret"}
-	if err := g.Apply(&s); err != nil {
+	if err := g.Apply(t.Context(), &s); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,7 +105,7 @@ func TestGateway(t *testing.T) {
 
 	// The same settings again keep the session.
 	same := s
-	if err := g.Apply(&same); err != nil {
+	if err := g.Apply(t.Context(), &same); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,7 +115,7 @@ func TestGateway(t *testing.T) {
 
 	// A wrong password: the session is replaced, and the refusal shows.
 	s.Password = "wrong"
-	if err := g.Apply(&s); err != nil {
+	if err := g.Apply(t.Context(), &s); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,7 +126,7 @@ func TestGateway(t *testing.T) {
 	}
 
 	// Unset.
-	if err := g.Apply(nil); err != nil {
+	if err := g.Apply(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -135,7 +135,7 @@ func TestGateway(t *testing.T) {
 	}
 
 	// Settings that cannot bind are refused at once.
-	if err := g.Apply(&gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "123456789"}); err == nil {
+	if err := g.Apply(t.Context(), &gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "123456789"}); err == nil {
 		t.Fatal("a password of 9 characters was applied")
 	}
 }

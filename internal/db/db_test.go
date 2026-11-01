@@ -514,12 +514,12 @@ func TestSMSC(t *testing.T) {
 	want := db.SMSC{
 		Host: "127.0.0.1", Port: 2775, SystemID: "simota", Originator: "+15550001000", Validity: time.Hour,
 	}
-	if err := d.PutSMSC(ctx, want); err == nil {
+	if _, err := d.PutSMSC(ctx, want); err == nil {
 		t.Fatal("expected a first SMSC without a password to be refused")
 	}
 
 	want.Password = "secret"
-	if err := d.PutSMSC(ctx, want); err != nil {
+	if _, err := d.PutSMSC(ctx, want); err != nil {
 		t.Fatal(err)
 	}
 
@@ -529,8 +529,9 @@ func TestSMSC(t *testing.T) {
 	update := want
 	update.Password = ""
 
-	if err := d.PutSMSC(ctx, update); err != nil {
-		t.Fatal(err)
+	// PutSMSC returns the SMSC as stored, with the password kept.
+	if got, err := d.PutSMSC(ctx, update); err != nil || got != want {
+		t.Fatalf("PutSMSC = %+v, %v, want %+v", got, err, want)
 	}
 
 	if got, err := d.GetSMSC(ctx); err != nil || got != want {
@@ -544,7 +545,7 @@ func TestSMSC(t *testing.T) {
 		{Host: "h", Port: 2775, SystemID: "simota", Password: "123456789", Validity: time.Hour},
 		{Host: "h", Port: 0, SystemID: "simota", Password: "pw", Validity: time.Hour},
 	} {
-		if err := d.PutSMSC(ctx, bad); err == nil {
+		if _, err := d.PutSMSC(ctx, bad); err == nil {
 			t.Errorf("PutSMSC(%+v) accepted", bad)
 		}
 	}

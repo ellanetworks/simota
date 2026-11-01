@@ -15,6 +15,7 @@ import (
 
 	"github.com/ellanetworks/simota/internal/db"
 	"github.com/ellanetworks/simota/internal/gateway"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Store interface {
@@ -29,7 +30,7 @@ type Store interface {
 	ListJobs(ctx context.Context, search string, page, perPage int) ([]db.Job, int, error)
 	SetCounter(ctx context.Context, iccid string, version int, counter uint64) error
 	GetSMSC(ctx context.Context) (db.SMSC, error)
-	PutSMSC(ctx context.Context, s db.SMSC) error
+	PutSMSC(ctx context.Context, s db.SMSC) (db.SMSC, error)
 }
 
 type Config struct {
@@ -42,12 +43,14 @@ type Config struct {
 	Ready func(ctx context.Context) error
 	// Gateway, when set, is the SMPP session to the SMSC: PUT /api/v1/smsc applies its settings, GET shows its state.
 	Gateway Gateway
-	Logger  *slog.Logger
+	// TracerProvider, when set, traces the requests to the API.
+	TracerProvider trace.TracerProvider
+	Logger         *slog.Logger
 }
 
 // Gateway is the SMPP session to the SMSC.
 type Gateway interface {
-	Apply(s *gateway.Settings) error
+	Apply(ctx context.Context, s *gateway.Settings) error
 	State() gateway.State
 }
 
@@ -85,7 +88,7 @@ func NewHandler(cfg Config) http.Handler {
 		mux.Handle("GET /", Frontend(cfg.Frontend))
 	}
 
-	return mux
+	return traced(cfg.TracerProvider, mux)
 }
 
 // Livez tells the kubelet that the process serves HTTP. It checks nothing else, so that a failing database fails
@@ -101,8 +104,8 @@ func Readyz(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg.Ready != nil {
 			if err := cfg.Ready(r.Context()); err != nil {
-				cfg.Logger.Warn("not ready", slog.Any("error", err))
-				writeJSON(w, ErrorResponse{Error: "Not ready"}, http.StatusServiceUnavailable, cfg.Logger)
+				cfg.Logger.WarnContext(r.Context(), "not ready", slog.Any("error", err))
+				writeJSON(w, r, ErrorResponse{Error: "Not ready"}, http.StatusServiceUnavailable, cfg.Logger)
 
 				return
 			}
@@ -128,8 +131,8 @@ type Status struct {
 }
 
 func GetStatus(cfg Config) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeResponse(w, Status{Version: cfg.Version}, http.StatusOK, cfg.Logger)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeResponse(w, r, Status{Version: cfg.Version}, http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -152,7 +155,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any, cfg Config) bool 
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request data", err, cfg.Logger)
+		writeError(w, r, http.StatusBadRequest, "Invalid request data", err, cfg.Logger)
 		return false
 	}
 
@@ -164,13 +167,13 @@ func pagination(w http.ResponseWriter, r *http.Request, cfg Config) (int, int, b
 
 	page, ok := atoiDefault(q.Get("page"), 1)
 	if !ok || page < 1 {
-		writeError(w, http.StatusBadRequest, "page must be an integer >= 1", nil, cfg.Logger)
+		writeError(w, r, http.StatusBadRequest, "page must be an integer >= 1", nil, cfg.Logger)
 		return 0, 0, false
 	}
 
 	perPage, ok := atoiDefault(q.Get("per_page"), defaultPerPage)
 	if !ok || perPage < 1 || perPage > maxPerPage {
-		writeError(w, http.StatusBadRequest, "per_page must be an integer between 1 and 100", nil, cfg.Logger)
+		writeError(w, r, http.StatusBadRequest, "per_page must be an integer between 1 and 100", nil, cfg.Logger)
 		return 0, 0, false
 	}
 
@@ -191,24 +194,26 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 }
 
-func writeResponse(w http.ResponseWriter, v any, status int, logger *slog.Logger) {
-	writeJSON(w, Response{Result: v}, status, logger)
+func writeResponse(w http.ResponseWriter, r *http.Request, v any, status int, logger *slog.Logger) {
+	writeJSON(w, r, Response{Result: v}, status, logger)
 }
 
-func writeError(w http.ResponseWriter, status int, message string, err error, logger *slog.Logger) {
+// writeError answers the request with status and message, and logs err in the request's context: as an error for a
+// 5xx, which is simota's, and at debug level otherwise, which is the client's.
+func writeError(w http.ResponseWriter, r *http.Request, status int, message string, err error, logger *slog.Logger) {
 	if status >= 500 {
-		logger.Error(message, slog.Any("error", err))
+		logger.ErrorContext(r.Context(), message, slog.Any("error", err))
 	} else {
-		logger.Debug(message, slog.Any("error", err))
+		logger.DebugContext(r.Context(), message, slog.Any("error", err))
 	}
 
-	writeJSON(w, ErrorResponse{Error: message}, status, logger)
+	writeJSON(w, r, ErrorResponse{Error: message}, status, logger)
 }
 
-func writeJSON(w http.ResponseWriter, v any, status int, logger *slog.Logger) {
+func writeJSON(w http.ResponseWriter, r *http.Request, v any, status int, logger *slog.Logger) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		logger.Error("failed to encode API response", slog.Any("error", err))
+		logger.ErrorContext(r.Context(), "failed to encode API response", slog.Any("error", err))
 		w.WriteHeader(http.StatusInternalServerError)
 
 		return
@@ -218,7 +223,7 @@ func writeJSON(w http.ResponseWriter, v any, status int, logger *slog.Logger) {
 	w.WriteHeader(status)
 
 	if _, err := w.Write(b); err != nil {
-		logger.Debug("failed to write API response", slog.Any("error", err))
+		logger.DebugContext(r.Context(), "failed to write API response", slog.Any("error", err))
 	}
 }
 

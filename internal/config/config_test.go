@@ -28,8 +28,20 @@ func TestLoad(t *testing.T) {
 	}
 
 	if cfg.Logging.Level != slog.LevelDebug || cfg.DB.Path != "simota.db" || cfg.API.Address.String() != "127.0.0.1" ||
-		cfg.API.Port != 5020 {
+		cfg.API.Port != 5020 || cfg.Telemetry.Enabled {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestLoadTelemetry(t *testing.T) {
+	cfg, err := config.Load(write(t, "db:\n  path: simota.db\napi:\n  address: 127.0.0.1\n"+
+		"telemetry:\n  enabled: true\n  otlp_endpoint: otel-collector:4317\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !cfg.Telemetry.Enabled || cfg.Telemetry.OTLPEndpoint != "otel-collector:4317" {
+		t.Fatalf("telemetry = %+v", cfg.Telemetry)
 	}
 }
 
@@ -43,6 +55,7 @@ func TestLoadRejects(t *testing.T) {
 		{"db:\n  path: simota.db\napi:\n  address: localhost\n", "parse config"},
 		// The SMSC is set over the API, not in the file.
 		{base + "smsc:\n  url: http://127.0.0.1:5010\n", "smsc"},
+		{base + "telemetry:\n  enabled: true\n", "telemetry.otlp_endpoint"},
 	} {
 		if _, err := config.Load(write(t, tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.err) {
 			t.Fatalf("Load(%q) = %v, want %q", tc.yaml, err, tc.err)

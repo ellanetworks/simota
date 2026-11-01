@@ -22,13 +22,16 @@ type SMSC struct {
 }
 
 // GetSMSC is the SMSC, or ErrNotFound before one is set.
-func (d *DB) GetSMSC(ctx context.Context) (SMSC, error) {
+func (d *DB) GetSMSC(ctx context.Context) (_ SMSC, err error) {
+	ctx, span := d.start(ctx, opGetSMSC)
+	defer func() { end(span, err) }()
+
 	var (
 		s        SMSC
 		validity int64
 	)
 
-	err := d.conn.QueryRowContext(ctx, `SELECT host, port, tls, system_id, password, originator, validity FROM smsc
+	err = d.conn.QueryRowContext(ctx, `SELECT host, port, tls, system_id, password, originator, validity FROM smsc
 		WHERE id = 1`).Scan(&s.Host, &s.Port, &s.TLS, &s.SystemID, &s.Password, &s.Originator, &validity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SMSC{}, ErrNotFound
@@ -43,9 +46,12 @@ func (d *DB) GetSMSC(ctx context.Context) (SMSC, error) {
 	return s, nil
 }
 
-// PutSMSC sets the SMSC. An empty password keeps the one set.
-func (d *DB) PutSMSC(ctx context.Context, s SMSC) error {
-	return d.tx(ctx, func(tx *sql.Tx) error {
+// PutSMSC sets the SMSC, and returns it as stored. An empty password keeps the one set.
+func (d *DB) PutSMSC(ctx context.Context, s SMSC) (_ SMSC, err error) {
+	ctx, span := d.start(ctx, opPutSMSC)
+	defer func() { end(span, err) }()
+
+	err = d.tx(ctx, func(tx *sql.Tx) error {
 		if s.Password == "" {
 			err := tx.QueryRowContext(ctx, "SELECT password FROM smsc WHERE id = 1").Scan(&s.Password)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -65,4 +71,9 @@ func (d *DB) PutSMSC(ctx context.Context, s SMSC) error {
 
 		return err
 	})
+	if err != nil {
+		return SMSC{}, err
+	}
+
+	return s, nil
 }

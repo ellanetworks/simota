@@ -22,6 +22,9 @@ import (
 	"github.com/ellanetworks/simota/internal/jobs"
 	"github.com/ellanetworks/simota/internal/ota"
 	"github.com/ellanetworks/smsc/smpp"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const iccid = "8949440000001659208"
@@ -98,6 +101,8 @@ type fakeSMSC struct {
 	mu        sync.Mutex
 	status    smpp.CommandStatus
 	submitted []*smpp.SubmitSM
+	// onSubmit, when set, runs as each submit_sm comes, before the SMSC answers it.
+	onSubmit func()
 }
 
 func newFakeSMSC(t *testing.T) (*fakeSMSC, int) {
@@ -115,6 +120,14 @@ func newFakeSMSC(t *testing.T) (*fakeSMSC, int) {
 			return smpp.BindOutcome{Status: smpp.StatusOK}
 		},
 		Handler: smpp.HandlerFunc(func(_ context.Context, _ *smpp.Session, req smpp.Request) smpp.Response {
+			f.mu.Lock()
+			onSubmit := f.onSubmit
+			f.mu.Unlock()
+
+			if onSubmit != nil {
+				onSubmit()
+			}
+
 			f.mu.Lock()
 			defer f.mu.Unlock()
 
@@ -238,6 +251,9 @@ type env struct {
 	// validity is the gateway's.
 	validity time.Duration
 	settings gateway.Settings
+	// spans records the spans of the store, the gateway and the runner, and tracer starts those of their callers.
+	spans  *tracetest.SpanRecorder
+	tracer trace.Tracer
 	// generic makes the SMSC forward the card's answer as pySim-smpp2sim does, a normal message without UDHI or TLVs,
 	// and send no receipt; otherwise as Ella SMSC does, an SME Manual/User Acknowledgement with UDHI and
 	// receipted_message_id, then a receipt.
@@ -253,7 +269,10 @@ func forms(t *testing.T, run func(t *testing.T, generic bool)) {
 func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	t.Helper()
 
-	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "simota.db"))
+	spans := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "simota.db"), db.WithTracerProvider(tp))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,16 +292,17 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	f, port := newFakeSMSC(t)
 	e := &env{
 		store: store, faults: &faultyStore{DB: store}, smsc: f, keyset: k, msisdn: msisdn, now: time.Now(),
-		validity: 24 * time.Hour,
+		validity: 24 * time.Hour, spans: spans, tracer: tp.Tracer("test"),
 	}
 
 	e.runner = jobs.NewRunner(e.faults, func(context.Context) (jobs.Gateway, error) {
 		return jobs.Gateway{SMSC: e.gw, Originator: "+15550001000", Validity: e.validity}, nil
 	}, time.Hour, slog.New(slog.DiscardHandler))
 	e.runner.Now = func() time.Time { return e.now }
+	e.runner.TracerProvider = tp
 
 	e.settings = gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "secret"}
-	e.gw = gateway.New(gateway.Config{Handler: e.runner})
+	e.gw = gateway.New(gateway.Config{Handler: e.runner, TracerProvider: tp})
 
 	t.Cleanup(func() { _ = e.gw.Close(context.Background()) })
 
@@ -295,7 +315,7 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 func (e *env) rebind(t *testing.T) {
 	t.Helper()
 
-	if err := e.gw.Apply(new(e.settings)); err != nil {
+	if err := e.gw.Apply(context.Background(), new(e.settings)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1016,7 +1036,7 @@ func TestNoTimeoutWhileUnbound(t *testing.T) {
 
 	e.step()
 
-	if err := e.gw.Apply(nil); err != nil {
+	if err := e.gw.Apply(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1289,9 +1309,30 @@ func TestSendFailures(t *testing.T) {
 		}
 	})
 
+	// A store that fails, as when the database is locked, holds the job queued rather than failing it: the same command
+	// is sent once the store answers.
+	t.Run("store fails", func(t *testing.T) {
+		e := newEnv(t, "+15550000001", sja5(t))
+		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+		e.faults.set(func(s *faultyStore) { s.card = errDB })
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobQueued || len(e.smsc.sent()) != 0 {
+			t.Fatalf("while the store fails, job = %+v", j)
+		}
+
+		e.faults.set(func(s *faultyStore) { s.card = nil })
+		e.step()
+
+		if j := e.job(t, id); j.Status != db.JobSent || j.Counter != 1 {
+			t.Fatalf("once the store answers, job = %+v", j)
+		}
+	})
+
 	t.Run("not bound", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
-		if err := e.gw.Apply(nil); err != nil {
+		if err := e.gw.Apply(context.Background(), nil); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1307,6 +1348,99 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("next counter = %d, %v", n, err)
 		}
 	})
+}
+
+// TestStop checks that a runner told to stop while the SMSC takes a job's message still records it, so that the job
+// is not sent again, and leaves the next jobs queued, without logging failures.
+func TestStop(t *testing.T) {
+	e := newEnv(t, "+15550000001", sja5(t))
+	logs := &recorder{}
+	e.runner.Logger = slog.New(logs)
+
+	other := db.Card{ICCID: "8949440000001659216", IMSI: "001010000000002", MSISDN: "+15550000002", TAR: tar, KVN: 1, KeySets: []db.KeySet{sja5(t)}}
+	if err := e.store.CreateCard(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	first := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
+
+	ids, err := e.store.CreateJobs(context.Background(), []db.Job{{ICCID: other.ICCID, Operation: db.OperationOPLMNRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
+	// The stop comes once the SMSC has the submit_sm, well before its submit_sm_resp.
+	e.smsc.mu.Lock()
+	e.smsc.onSubmit = func() {
+		stop()
+		time.Sleep(50 * time.Millisecond)
+	}
+	e.smsc.mu.Unlock()
+
+	e.runner.Step(ctx)
+
+	if j := e.job(t, first); j.Status != db.JobSent || j.MessageID != "1" || j.Counter != 1 {
+		t.Fatalf("job whose message the SMSC took = %+v", j)
+	}
+
+	if j := e.job(t, ids[0]); j.Status != db.JobQueued || len(e.smsc.sent()) != 1 {
+		t.Fatalf("next job = %+v, %d messages sent", j, len(e.smsc.sent()))
+	}
+
+	if l := logs.above(slog.LevelWarn); len(l) > 0 {
+		t.Fatalf("logged on stop: %v", l)
+	}
+
+	// The processing of the job ends, as sent, though the runner was told to stop.
+	if p := e.named(processName); len(p) != 1 || spanAttrs(p[0])["ella.ota.job.outcome"] != "sent" {
+		t.Fatalf("process spans on stop: %d", len(p))
+	}
+
+	// A stopped runner starts nothing.
+	e.runner.Step(ctx)
+
+	if len(e.smsc.sent()) != 1 {
+		t.Fatalf("a stopped runner sent %d messages", len(e.smsc.sent()))
+	}
+}
+
+// recorder is a slog.Handler that keeps the records.
+type recorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (r *recorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *recorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	r.records = append(r.records, rec)
+	r.mu.Unlock()
+
+	return nil
+}
+
+func (r *recorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *recorder) WithGroup(string) slog.Handler { return r }
+
+// above are the messages of the records of level at least l.
+func (r *recorder) above(l slog.Level) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var out []string
+
+	for _, rec := range r.records {
+		if rec.Level >= l {
+			out = append(out, rec.Message)
+		}
+	}
+
+	return out
 }
 
 func TestRejected(t *testing.T) {

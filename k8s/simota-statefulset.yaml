@@ -14,6 +14,9 @@ spec:
         app: simota
     spec:
       automountServiceAccountToken: false
+      # simota stops in up to 75 seconds: 5 for the API's requests, 60 for the job being sent, 5 to unbind and 5 to
+      # export the last spans.
+      terminationGracePeriodSeconds: 80
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
