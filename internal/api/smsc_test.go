@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,7 +20,7 @@ type fakeGateway struct {
 	state   gateway.State
 }
 
-func (f *fakeGateway) Apply(s *gateway.Settings) error {
+func (f *fakeGateway) Apply(_ context.Context, s *gateway.Settings) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

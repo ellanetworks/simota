@@ -16,6 +16,12 @@ linters:
     - whitespace
     - govet
     - wsl_v5
+    - sloglint
+  settings:
+    sloglint:
+      # A record carries the trace context of its context: log with one wherever one is in scope.
+      context: scope
+      attr-only: true
 issues:
   new-from-rev: ""
   new: false

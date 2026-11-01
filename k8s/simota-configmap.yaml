@@ -12,3 +12,7 @@ data:
       # The API and the UI have no authentication: anyone who reaches the Service may use them.
       address: 0.0.0.0
       port: 5020
+    # Optional: export traces to an OTLP/gRPC collector.
+    # telemetry:
+    #   enabled: true
+    #   otlp_endpoint: otel-collector.observability.svc:4317

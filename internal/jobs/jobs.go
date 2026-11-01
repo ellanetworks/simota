@@ -16,7 +16,9 @@ import (
 	"github.com/ellanetworks/simota/internal/db"
 	"github.com/ellanetworks/simota/internal/ota"
 	"github.com/ellanetworks/simota/internal/rfm"
+	"github.com/ellanetworks/simota/internal/tracing"
 	"github.com/ellanetworks/smsc/smpp"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ReadChunk is the most file octets a read command asks for: 25 entries. The PoR, with its header, a CC of 8 octets,
@@ -110,6 +112,10 @@ type SMSC interface {
 // batch is the most jobs of a status that a step handles.
 const batch = 100
 
+// jobTimeout bounds the handling of one job in a step: its reads and writes of the store, which wait at most the
+// database's busy timeout each, and its submit_sm, which waits at most the session's response timer.
+const jobTimeout = time.Minute
+
 // Gateway is the SMSC that OTA messages go through, the address they come from, and how long the SMSC attempts their
 // delivery.
 type Gateway struct {
@@ -131,6 +137,8 @@ type Runner struct {
 	Logger   *slog.Logger
 	// Now is the clock, time.Now when nil.
 	Now func() time.Time
+	// TracerProvider, when set, traces the processing of each job and each deliver_sm.
+	TracerProvider trace.TracerProvider
 
 	wake chan struct{}
 	// mu orders a submit_sm and the recording of its counter and message_id before any deliver_sm about it is
@@ -167,7 +175,8 @@ func (r *Runner) Wake() {
 	}
 }
 
-// Run steps every Interval, and when woken, until ctx ends.
+// Run steps every Interval, and when woken, until ctx ends. It returns once the step in progress has finished the job
+// it is on, within jobTimeout.
 func (r *Runner) Run(ctx context.Context) {
 	t := time.NewTicker(r.Interval)
 	defer t.Stop()
@@ -187,20 +196,27 @@ func (r *Runner) Run(ctx context.Context) {
 // Step closes the sent jobs that nothing answered in time, then sends the queued ones, all only while bound: the SMSC
 // holds its deliver_sm while simota is unbound. A job whose submit_sm fails without the SMSC refusing it stays
 // queued, for a later step.
+//
+// ctx tells the runner to stop: Step then starts no other job, but finishes the one it is on (see work), so that a
+// message the SMSC took is recorded, and is not sent again.
 func (r *Runner) Step(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	gw, err := r.Connect(ctx)
-	if errors.Is(err, ErrNoGateway) {
+	if errors.Is(err, ErrNoGateway) || stopped(ctx, err) {
 		return
 	}
 
 	if err != nil {
-		r.Logger.Error("failed to get the SMSC", slog.Any("error", err))
+		r.Logger.ErrorContext(ctx, "failed to get the SMSC", slog.Any("error", err))
 		return
 	}
 
 	if !gw.SMSC.Bound() {
 		r.boundSince = time.Time{}
-		r.Logger.Debug("not bound to the SMSC, jobs wait")
+		r.Logger.DebugContext(ctx, "not bound to the SMSC, jobs wait")
 
 		return
 	}
@@ -216,16 +232,32 @@ func (r *Runner) Step(ctx context.Context) {
 	}
 
 	queued, err := r.Store.JobsIn(ctx, db.JobQueued, batch)
+	if stopped(ctx, err) {
+		return
+	}
+
 	if err != nil {
-		r.Logger.Error("failed to list queued jobs", slog.Any("error", err))
+		r.Logger.ErrorContext(ctx, "failed to list queued jobs", slog.Any("error", err))
 		return
 	}
 
 	for _, j := range queued {
-		if !r.send(ctx, gw, j) {
+		if ctx.Err() != nil || !r.send(ctx, gw, j) {
 			return
 		}
 	}
+}
+
+// work is the context of the handling of one job, from a step's ctx: it keeps ctx's values, such as its trace, but
+// not its end, so that a job is not left half handled, as sent to the SMSC but not recorded, when the runner stops.
+// jobTimeout bounds it instead.
+func work(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), jobTimeout)
+}
+
+// stopped reports whether err is that of the runner told to stop, by the end of ctx, which is not a failure.
+func stopped(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err())
 }
 
 // sweep closes, without a PoR, the sent jobs answered by nothing answerGrace past the validity, nor in answerGrace of
@@ -241,12 +273,20 @@ func (r *Runner) sweep(ctx context.Context, validity time.Duration) {
 	}
 
 	sent, err := r.Store.JobsIn(ctx, db.JobSent, batch)
+	if stopped(ctx, err) {
+		return
+	}
+
 	if err != nil {
-		r.Logger.Error("failed to list sent jobs", slog.Any("error", err))
+		r.Logger.ErrorContext(ctx, "failed to list sent jobs", slog.Any("error", err))
 		return
 	}
 
 	for _, j := range sent {
+		if ctx.Err() != nil {
+			return
+		}
+
 		// A sent job's updated_at is when its current command was sent.
 		if now.Sub(j.UpdatedAt) <= validity+answerGrace {
 			continue
@@ -255,16 +295,37 @@ func (r *Runner) sweep(ctx context.Context, validity time.Duration) {
 		next := noPoR(j, "no PoR and no delivery receipt from the SMSC within the validity of the message")
 		next.PoRMissing = true
 
-		if err := r.finish(ctx, next); err != nil {
-			r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
+		jctx, cancel := work(ctx)
+		jctx, span := r.startProcess(jctx, j)
+
+		setOutcome(jctx, outcomeExpired, next.Error)
+
+		if err := r.finish(jctx, next); err != nil {
+			r.Logger.ErrorContext(jctx, "failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
 		}
+
+		span.End()
+		cancel()
 	}
 }
 
-// send sends a queued job's current command, and reports whether the next job may be sent: not while unbound or
-// throttled.
+// send sends a queued job's current command, and reports whether the next job may be sent: not while unbound,
+// throttled, or while the store fails. A job fails on what sending it again would not change; it stays queued on a
+// failure of the store, such as a locked database, which may not last.
 func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
-	card, keyset, err := r.cardOf(ctx, j)
+	ctx, cancel := work(ctx)
+	defer cancel()
+
+	// fail, retry and storeFailed set the outcome of the processing on its span, and so does each return here.
+	ctx, span := r.startProcess(ctx, j)
+	defer span.End()
+
+	card, err := r.Store.GetCard(ctx, j.ICCID)
+	if err != nil {
+		return r.storeFailed(ctx, j, fmt.Sprintf("card %s", j.ICCID), err)
+	}
+
+	keyset, err := keysetFor(card, j)
 	if err != nil {
 		r.fail(ctx, j, err.Error())
 		return true
@@ -284,8 +345,7 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 
 	counter, err := r.Store.NextCounter(ctx, j.ICCID, j.KVN)
 	if err != nil {
-		r.fail(ctx, j, fmt.Sprintf("key set %d: %v", j.KVN, err))
-		return true
+		return r.storeFailed(ctx, j, fmt.Sprintf("key set %d", j.KVN), err)
 	}
 
 	cmd := ota.Command{Keyset: keyset, Counter: counter, Data: data}
@@ -310,7 +370,9 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 
 	switch {
 	case errors.Is(err, smpp.ErrNoSession):
-		r.Logger.Debug("not bound to the SMSC, jobs wait", slog.Int64("job", j.ID))
+		r.Logger.DebugContext(ctx, "not bound to the SMSC, jobs wait", slog.Int64("job", j.ID))
+		setOutcome(ctx, outcomeWaiting, "")
+
 		return false
 	case Rejected(err):
 		r.fail(ctx, j, fmt.Sprintf("SMSC refused the message: %v", err))
@@ -328,11 +390,29 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 	// writes the same octets and reads them back, or reads. The first message's PoR carries the spent counter, so it
 	// answers no job's command and is left aside; a duplicate never reuses a counter, which the card would refuse.
 	if err := r.Store.MarkJobSent(ctx, j.ID, counter, id, sm.ShortMessage); err != nil {
-		r.Logger.Error("failed to mark job sent", slog.Int64("job", j.ID), slog.String("message", id), slog.Any("error", err))
+		r.Logger.ErrorContext(ctx, "failed to mark job sent", slog.Int64("job", j.ID), slog.String("message", id), slog.Any("error", err))
 		return r.retry(ctx, j, fmt.Errorf("record message %s: %w", id, err))
 	}
 
+	setOutcome(ctx, outcomeSent, "")
+
 	return true
+}
+
+// storeFailed handles a failure of the store to give what a queued job needs, of what: the job fails when what it
+// needs is gone or spent, and waits otherwise, with the rest of the batch. It reports whether the next job may be
+// sent.
+func (r *Runner) storeFailed(ctx context.Context, j db.Job, what string, err error) bool {
+	if errors.Is(err, db.ErrNotFound) || errors.Is(err, db.ErrCounterExhausted) {
+		r.fail(ctx, j, fmt.Sprintf("%s: %v", what, err))
+		return true
+	}
+
+	r.Logger.ErrorContext(ctx, "failed to read the store for a job, it waits", slog.Int64("job", j.ID), slog.String("what", what),
+		slog.Any("error", err))
+	setOutcome(ctx, outcomeWaiting, "")
+
+	return false
 }
 
 // retry counts a failed submit of a job's command and fails the job at the maxAttempts-th. After a throttling or a
@@ -340,7 +420,7 @@ func (r *Runner) send(ctx context.Context, gw Gateway, j db.Job) bool {
 func (r *Runner) retry(ctx context.Context, j db.Job, err error) bool {
 	n, cerr := r.Store.CountAttempt(ctx, j.ID)
 	if cerr != nil {
-		r.Logger.Error("failed to count a submit attempt", slog.Int64("job", j.ID), slog.Any("error", cerr))
+		r.Logger.ErrorContext(ctx, "failed to count a submit attempt", slog.Int64("job", j.ID), slog.Any("error", cerr))
 	}
 
 	if n >= maxAttempts {
@@ -348,7 +428,8 @@ func (r *Runner) retry(ctx context.Context, j db.Job, err error) bool {
 		return true
 	}
 
-	r.Logger.Warn("failed to submit job, will retry", slog.Int64("job", j.ID), slog.Int("attempt", n), slog.Any("error", err))
+	r.Logger.WarnContext(ctx, "failed to submit job, will retry", slog.Int64("job", j.ID), slog.Int("attempt", n), slog.Any("error", err))
+	setOutcome(ctx, outcomeRetry, "")
 
 	var se *smpp.StatusError
 	if !errors.As(err, &se) {
@@ -426,23 +507,18 @@ func Rejected(err error) bool {
 	}
 }
 
-// cardOf is the card of a job, and the job's key set on it.
-func (r *Runner) cardOf(ctx context.Context, j db.Job) (db.Card, ota.Keyset, error) {
-	card, err := r.Store.GetCard(ctx, j.ICCID)
-	if err != nil {
-		return db.Card{}, ota.Keyset{}, fmt.Errorf("card %s: %w", j.ICCID, err)
-	}
-
+// keysetFor is the key set of a job on its card, which must have an MSISDN to be reached.
+func keysetFor(card db.Card, j db.Job) (ota.Keyset, error) {
 	if card.MSISDN == "" {
-		return db.Card{}, ota.Keyset{}, errors.New("the card has no MSISDN")
+		return ota.Keyset{}, errors.New("the card has no MSISDN")
 	}
 
 	keyset, ok := keysetOf(card, j.KVN)
 	if !ok {
-		return db.Card{}, ota.Keyset{}, fmt.Errorf("the card has no key set %d", j.KVN)
+		return ota.Keyset{}, fmt.Errorf("the card has no key set %d", j.KVN)
 	}
 
-	return card, keyset, nil
+	return keyset, nil
 }
 
 // keysetOf is the key set of version kvn of a card.
@@ -466,18 +542,40 @@ func keysetOf(card db.Card, kvn int) (ota.Keyset, bool) {
 // ServeSMPP takes the SMSC's deliver_sm: the card's answer or the SMSC's delivery receipt (SMPP 3.4 sections 2.11 and
 // 5.2.12). It answers ESME_RX_T_APPN when it cannot record the outcome, so that the SMSC sends the deliver_sm again
 // later, and ESME_ROK otherwise, for a deliver_sm of no job too.
-func (r *Runner) ServeSMPP(ctx context.Context, _ *smpp.Session, req smpp.Request) smpp.Response {
+//
+// Each deliver_sm is a span that ends once its deliver_sm_resp is written, or fails to be; the session answers
+// ESME_RSYSERR to a panic, without telling, so the span then ends as that.
+func (r *Runner) ServeSMPP(ctx context.Context, s *smpp.Session, req smpp.Request) smpp.Response {
 	d, ok := req.PDU.(*smpp.DeliverSM)
 	if !ok {
 		return smpp.Response{}
 	}
 
-	if err := r.Deliver(ctx, d); err != nil {
-		r.Logger.Error("failed to record a deliver_sm, the SMSC will send it again", slog.Any("error", err))
-		return smpp.Response{Status: smpp.StatusXTAppn}
+	ctx, span := r.startDeliver(ctx, s)
+	answered := false
+
+	defer func() {
+		if !answered {
+			tracing.EndSMPP(span, new(smpp.StatusSysErr), nil)
+		}
+	}()
+
+	status, cause := smpp.StatusOK, r.Deliver(ctx, d)
+	if cause != nil {
+		r.Logger.ErrorContext(ctx, "failed to record a deliver_sm, the SMSC will send it again", slog.Any("error", cause))
+
+		status = smpp.StatusXTAppn
 	}
 
-	return smpp.Response{}
+	answered = true
+
+	return smpp.Response{Status: status, Written: func(err error) {
+		if err == nil {
+			err = cause
+		}
+
+		tracing.EndSMPP(span, &status, err)
+	}}
 }
 
 // Deliver records a deliver_sm on the job it is about. It is an error only when the outcome could not be stored.
@@ -487,14 +585,19 @@ func (r *Runner) Deliver(ctx context.Context, d *smpp.DeliverSM) error {
 
 	switch d.ESMClass >> 2 & 0x0f {
 	case messageTypeReceipt:
+		deliverKind(ctx, deliverReceipt)
 		return r.receipt(ctx, d)
 	case messageTypeDefault, messageTypeUserAck:
 		if packet, ok := responsePacket(d); ok {
+			deliverKind(ctx, deliverPoR)
 			return r.answer(ctx, d, packet)
 		}
 	}
 
-	r.Logger.Info("ignoring a deliver_sm that is neither a PoR nor a receipt", slog.Int("esm_class", int(d.ESMClass)),
+	deliverKind(ctx, deliverOther)
+	deliverOutcome(ctx, deliverIgnored, "")
+
+	r.Logger.InfoContext(ctx, "ignoring a deliver_sm that is neither a PoR nor a receipt", slog.Int("esm_class", int(d.ESMClass)),
 		slog.String("source", d.Source.Addr))
 
 	return nil
@@ -556,7 +659,11 @@ func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM, packet []byte) e
 		if !ok {
 			if j.Status == db.JobSent && inFlight == 1 {
 				// The PoR of this card's command cannot be read: a configuration error, which a retry does not fix.
-				return r.finish(ctx, noPoR(j, fmt.Sprintf("the card has no key set %d to read its PoR", j.KVN)))
+				next := noPoR(j, fmt.Sprintf("the card has no key set %d to read its PoR", j.KVN))
+
+				deliverMatched(ctx, j)
+
+				return recorded(ctx, deliverRecorded, next.Status, r.finish(ctx, next))
 			}
 
 			continue
@@ -573,14 +680,17 @@ func (r *Runner) answer(ctx context.Context, d *smpp.DeliverSM, packet []byte) e
 		}
 
 		if id := d.Options.ReceiptedMessageID; id != nil && *id != j.MessageID {
-			r.Logger.Debug("a PoR's receipted_message_id is not its command's message_id", slog.Int64("job", j.ID),
+			r.Logger.DebugContext(ctx, "a PoR's receipted_message_id is not its command's message_id", slog.Int64("job", j.ID),
 				slog.String("receipted_message_id", *id), slog.String("message_id", j.MessageID))
 		}
+
+		deliverMatched(ctx, j)
 
 		return r.record(ctx, j, resp, packet)
 	}
 
-	r.Logger.Info("ignoring a PoR that answers no job's command", slog.String("source", d.Source.Addr),
+	deliverOutcome(ctx, deliverUnmatched, "")
+	r.Logger.InfoContext(ctx, "ignoring a PoR that answers no job's command", slog.String("source", d.Source.Addr),
 		slog.String("tar", fmt.Sprintf("%x", tar)), slog.Any("error", decodeErr))
 
 	return nil
@@ -594,24 +704,27 @@ func (r *Runner) record(ctx context.Context, j db.Job, resp ota.Response, packet
 
 	if j.Status == db.JobSent {
 		if final {
-			return r.finish(ctx, next)
+			return recorded(ctx, deliverRecorded, next.Status, r.finish(ctx, next))
 		}
 
 		if err := r.Store.AdvanceJob(ctx, next); err != nil && !errors.Is(err, db.ErrNotFound) {
 			return fmt.Errorf("advance job %d: %w", j.ID, err)
 		}
 
+		deliverOutcome(ctx, deliverRecorded, db.JobQueued)
 		r.Wake()
 
 		return nil
 	}
 
 	if !final {
-		r.Logger.Info("ignoring a late PoR to a step of a read closed without it", slog.Int64("job", j.ID))
+		deliverOutcome(ctx, deliverIgnored, "")
+		r.Logger.InfoContext(ctx, "ignoring a late PoR to a step of a read closed without it", slog.Int64("job", j.ID))
+
 		return nil
 	}
 
-	r.Logger.Info("a late PoR answers a job closed without it", slog.Int64("job", j.ID), slog.String("was", string(j.Status)))
+	r.Logger.InfoContext(ctx, "a late PoR answers a job closed without it", slog.Int64("job", j.ID), slog.String("was", string(j.Status)))
 
 	next.PoRMissing = false
 
@@ -619,7 +732,8 @@ func (r *Runner) record(ctx context.Context, j db.Job, resp ota.Response, packet
 		return fmt.Errorf("revise job %d: %w", j.ID, err)
 	}
 
-	r.logFinished(next)
+	deliverOutcome(ctx, deliverRevised, next.Status)
+	r.logFinished(ctx, next)
 
 	return nil
 }
@@ -636,13 +750,17 @@ func (r *Runner) receipt(ctx context.Context, d *smpp.DeliverSM) error {
 	}
 
 	if id == "" {
-		r.Logger.Info("ignoring a receipt without a message id", slog.String("text", string(d.ShortMessage)))
+		deliverOutcome(ctx, deliverUnmatched, "")
+		r.Logger.InfoContext(ctx, "ignoring a receipt without a message id", slog.String("text", string(d.ShortMessage)))
+
 		return nil
 	}
 
 	j, err := r.Store.SentJob(ctx, id)
 	if errors.Is(err, db.ErrNotFound) {
-		r.Logger.Debug("ignoring a receipt for no job in progress", slog.String("message", id))
+		deliverOutcome(ctx, deliverUnmatched, "")
+		r.Logger.DebugContext(ctx, "ignoring a receipt for no job in progress", slog.String("message", id))
+
 		return nil
 	}
 
@@ -653,7 +771,18 @@ func (r *Runner) receipt(ctx context.Context, d *smpp.DeliverSM) error {
 	next := noPoR(j, receiptReason(d))
 	next.PoRMissing = true
 
-	return r.finish(ctx, next)
+	deliverMatched(ctx, j)
+
+	return recorded(ctx, deliverRecorded, next.Status, r.finish(ctx, next))
+}
+
+// recorded sets the outcome of a deliver_sm, with the status it leaves its job in, once err tells it was stored.
+func recorded(ctx context.Context, outcome string, status db.JobStatus, err error) error {
+	if err == nil {
+		deliverOutcome(ctx, outcome, status)
+	}
+
+	return err
 }
 
 // receiptReason tells what a receipt says of its message.
@@ -978,8 +1107,10 @@ func asSentence(s string) string {
 // fail fails a queued job, for the runner, which logs a failure to store it: the job stays queued and is tried again.
 func (r *Runner) fail(ctx context.Context, j db.Job, reason string) {
 	j.Status, j.Error = db.JobFailed, asSentence(reason)
+	setOutcome(ctx, outcomeFailed, j.Error)
+
 	if err := r.finish(ctx, j); err != nil {
-		r.Logger.Error("failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
+		r.Logger.ErrorContext(ctx, "failed to finish job", slog.Int64("job", j.ID), slog.Any("error", err))
 	}
 }
 
@@ -995,12 +1126,12 @@ func (r *Runner) finish(ctx context.Context, j db.Job) error {
 		return fmt.Errorf("finish job %d: %w", j.ID, err)
 	}
 
-	r.logFinished(j)
+	r.logFinished(ctx, j)
 
 	return nil
 }
 
-func (r *Runner) logFinished(j db.Job) {
-	r.Logger.Info("job finished", slog.Int64("job", j.ID), slog.String("iccid", j.ICCID), slog.String("status", string(j.Status)),
+func (r *Runner) logFinished(ctx context.Context, j db.Job) {
+	r.Logger.InfoContext(ctx, "job finished", slog.Int64("job", j.ID), slog.String("iccid", j.ICCID), slog.String("status", string(j.Status)),
 		slog.String("error", j.Error))
 }

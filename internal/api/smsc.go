@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -67,18 +69,18 @@ func GetSMSC(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s, err := cfg.Store.GetSMSC(r.Context())
 		if errors.Is(err, db.ErrNotFound) {
-			writeResponse(w, SMSCSettings{Port: defaultPort, ValiditySeconds: defaultValiditySeconds, Bind: bindState(cfg)},
+			writeResponse(w, r, SMSCSettings{Port: defaultPort, ValiditySeconds: defaultValiditySeconds, Bind: bindState(cfg)},
 				http.StatusOK, cfg.Logger)
 
 			return
 		}
 
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
 			return
 		}
 
-		writeResponse(w, smscResponse(cfg, s), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, smscResponse(cfg, s), http.StatusOK, cfg.Logger)
 	})
 }
 
@@ -112,7 +114,7 @@ func UpdateSMSC(cfg Config) http.Handler {
 			p.Port = defaultPort
 		}
 
-		bad := func(message string) { writeError(w, http.StatusBadRequest, message, nil, cfg.Logger) }
+		bad := func(message string) { writeError(w, r, http.StatusBadRequest, message, nil, cfg.Logger) }
 
 		switch {
 		case !validHost(p.Host):
@@ -141,25 +143,28 @@ func UpdateSMSC(cfg Config) http.Handler {
 			return
 		}
 
-		s := db.SMSC{
-			Host: p.Host, Port: p.Port, TLS: p.TLS, SystemID: p.SystemID, Password: p.Password, Originator: p.Originator,
-			Validity: time.Duration(p.ValiditySeconds) * time.Second,
-		}
-		if err := cfg.Store.PutSMSC(r.Context(), s); err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update the SMSC", err, cfg.Logger)
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			writeError(w, r, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
 			return
 		}
 
-		updated, err := cfg.Store.GetSMSC(r.Context())
+		updated, err := cfg.Store.PutSMSC(r.Context(), db.SMSC{
+			Host: p.Host, Port: p.Port, TLS: p.TLS, SystemID: p.SystemID, Password: p.Password, Originator: p.Originator,
+			Validity: time.Duration(p.ValiditySeconds) * time.Second,
+		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to get the SMSC", err, cfg.Logger)
+			writeError(w, r, http.StatusInternalServerError, "Failed to update the SMSC", err, cfg.Logger)
 			return
 		}
+
+		// The settings are stored: the session must take them though the client goes away, so what follows does
+		// not end with the request, and keeps its values, such as its trace.
+		ctx := context.WithoutCancel(r.Context())
 
 		// The session binds again only when its connection settings changed.
 		if cfg.Gateway != nil {
-			if err := cfg.Gateway.Apply(new(gateway.SettingsOf(updated))); err != nil {
-				cfg.Logger.Error("failed to connect to the SMSC", "error", err)
+			if err := cfg.Gateway.Apply(ctx, new(gateway.SettingsOf(updated))); err != nil {
+				cfg.Logger.ErrorContext(ctx, "failed to connect to the SMSC", slog.Any("error", err))
 			}
 		}
 
@@ -167,7 +172,7 @@ func UpdateSMSC(cfg Config) http.Handler {
 			cfg.Notify()
 		}
 
-		writeResponse(w, smscResponse(cfg, updated), http.StatusOK, cfg.Logger)
+		writeResponse(w, r, smscResponse(cfg, updated), http.StatusOK, cfg.Logger)
 	})
 }
 

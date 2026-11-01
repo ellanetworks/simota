@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -26,12 +27,16 @@ func isUnique(err error) bool {
 type DB struct {
 	conn *sql.DB
 	now  func() time.Time
+	// tracer traces the operations made within a caller's span, when set.
+	tracer trace.Tracer
 }
 
 // migrations are the schema's versions; the first is the schema. A job's por_missing marks it closed without the PoR to
 // its last command, by a receipt or the deadline, which a later PoR of that command's TAR and counter still decides;
 // its attempts count the failed submits of its current command. An IMSI write keeps the IMSI it writes and the card's
-// IMSI on record that it replaces.
+// IMSI on record that it replaces. A job's traceparent is that of the span that created it, and its
+// command_traceparent that of the span that sent its current command, NULL when untraced: the spans that run the job
+// later link to them.
 var migrations = []string{
 	`CREATE TABLE cards (
 		iccid TEXT PRIMARY KEY,
@@ -80,6 +85,8 @@ var migrations = []string{
 		error TEXT NOT NULL,
 		por_missing INTEGER NOT NULL CHECK (por_missing IN (0, 1)),
 		attempts INTEGER NOT NULL CHECK (attempts >= 0),
+		traceparent TEXT,
+		command_traceparent TEXT,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		CHECK (operation NOT IN ('oplmn_set', 'oplmn_clear') OR slot IS NOT NULL),
@@ -103,7 +110,7 @@ var migrations = []string{
 }
 
 // Open opens the database at path, creating it readable and writable by its owner only: it holds the cards' keys.
-func Open(ctx context.Context, path string) (*DB, error) {
+func Open(ctx context.Context, path string, opts ...Option) (*DB, error) {
 	if err := restrict(path); err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -116,6 +123,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	conn.SetMaxOpenConns(1)
 
 	d := &DB{conn: conn, now: time.Now}
+	for _, opt := range opts {
+		opt(d)
+	}
+
 	if err := d.migrate(ctx); err != nil {
 		_ = conn.Close()
 		return nil, err

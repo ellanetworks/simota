@@ -6,3 +6,7 @@ api:
   # The API and the UI have no authentication: keep them on the loopback interface.
   address: 127.0.0.1
   port: 5020
+# Optional: export traces to an OTLP/gRPC collector.
+# telemetry:
+#   enabled: true
+#   otlp_endpoint: localhost:4317
