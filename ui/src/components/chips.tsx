@@ -7,7 +7,6 @@ const statusColors: Record<JobStatus, ChipProps["color"]> = {
   queued: "info",
   sent: "info",
   succeeded: "success",
-  // An unconfirmed write may have taken effect.
   unconfirmed: "warning",
   failed: "error",
 };
@@ -20,7 +19,6 @@ const statusLabels: Record<JobStatus, string> = {
   failed: "Failed",
 };
 
-// JobStatusChip is a job's status, with what it means on hover, as smsc's peer state chip.
 export function JobStatusChip({ status }: { status: JobStatus }) {
   return (
     <Tooltip title={statusHelp[status]} arrow>
@@ -54,7 +52,6 @@ const bindHelp: Record<BindStatus, string> = {
   disconnected: "The session failed; simota binds again shortly.",
 };
 
-// BindStatusChip is the state of simota's SMPP session to the SMSC, with what it means on hover.
 export function BindStatusChip({ status }: { status: BindStatus }) {
   return (
     <Tooltip title={bindHelp[status]} arrow>

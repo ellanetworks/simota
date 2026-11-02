@@ -7,7 +7,6 @@ import (
 	"testing"
 )
 
-// sysmocom has the columns of a sysmoISIM-SJA5 key file, with made-up values.
 const sysmocom = "IMSI\tICCID\tACC\tPIN1\tPUK1\tPIN2\tPUK2\tKi\tOPC\tADM1\tKIC1\tKID1\tKIK1\tKIC2\tKID2\tKIK2\tKIC3\tKID3\tKIK3\n" +
 	"999700000000001\t8988211000000000017\t0001\t0000\t11111111\t0000\t22222222\t000102030405060708090A0B0C0D0E0F\t" +
 	"0F0E0D0C0B0A09080706050403020100\t12345678\t11111111111111111111111111111111\t22222222222222222222222222222222\t" +
@@ -34,7 +33,6 @@ func TestParseSysmocom(t *testing.T) {
 		t.Fatalf("key set 1 = %+v", k)
 	}
 
-	// The same 16-octet keys are AES-128 keys when the card's key sets are AES.
 	if cards, err := Parse(strings.NewReader(sysmocom), "aes"); err != nil || len(cards[0].KeySets) != 3 {
 		t.Fatalf("Parse as AES = %+v, %v", cards, err)
 	}
@@ -53,7 +51,6 @@ func TestParseSkipsIncompleteKeySet(t *testing.T) {
 	}
 }
 
-// TestParseWithoutIMSI reads a file without IMSIs: the IMSI is informational.
 func TestParseWithoutIMSI(t *testing.T) {
 	keys := strings.Repeat("11", 16) + "," + strings.Repeat("22", 16)
 

@@ -27,7 +27,6 @@ type Call = { method: string; path: string; body?: unknown };
 
 type Route = (url: URL, init?: RequestInit) => Response;
 
-// serve is the cards API over a list of cards that its writes change. A route in overrides answers instead.
 const serve = (
   overrides: Record<string, Route> = {},
   initial: Card[] = [card],
@@ -95,7 +94,6 @@ const serve = (
   return calls;
 };
 
-// page is the page of cards that url asks for, as the server paginates them.
 const page = (url: URL, cards: Card[]) => {
   const number = Number(url.searchParams.get("page") ?? 1);
   const perPage = Number(url.searchParams.get("per_page") ?? 25);
@@ -113,7 +111,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// grid is the grid once the first page of cards has loaded, which the count in the heading tells.
 const grid = async () => {
   await screen.findByRole("heading", { name: /^Cards \(\d+\)$/ });
   return screen.getByRole("grid", { name: "Cards" });
@@ -134,7 +131,6 @@ const textbox = (dialog: HTMLElement, name: RegExp) =>
 const type = (dialog: HTMLElement, name: RegExp, value: string) =>
   fireEvent.change(textbox(dialog, name), { target: { value } });
 
-// choose picks an option of a select.
 const choose = (dialog: HTMLElement, name: RegExp, option: string) => {
   fireEvent.mouseDown(within(dialog).getByRole("combobox", { name }));
   fireEvent.click(screen.getByRole("option", { name: option }));
@@ -158,7 +154,6 @@ const openImport = async () => {
   return screen.getByRole("dialog", { name: "Import Cards" });
 };
 
-// chooseFile chooses a key file, and the algorithm of its key sets unless told none.
 const chooseFile = (
   dialog: HTMLElement,
   content: string,
@@ -177,7 +172,6 @@ const pickFile = (dialog: HTMLElement, content: string) =>
 
 const KEY_16 = "00".repeat(16);
 
-// fillValid fills the add dialog with a valid 3DES card.
 const fillValid = (dialog: HTMLElement) => {
   type(dialog, /^ICCID/, card.iccid);
   type(dialog, /^IMSI/, IMSI);
@@ -194,7 +188,6 @@ describe("Cards", () => {
     expect(
       screen.getByRole("heading", { name: "Cards (1)" }),
     ).toBeInTheDocument();
-    // The table shows the key set in use only.
     expect(rowCells(card.iccid).slice(0, 6)).toEqual([
       "8949440000001659208",
       IMSI,
@@ -616,7 +609,6 @@ describe("Import", () => {
     expect(submit).toBeDisabled();
     chooseFile(dialog, "ICCID,IMSI,KIC1\n", null);
     expect(within(dialog).getByText("cards.csv")).toBeInTheDocument();
-    // A key file does not tell its algorithm.
     expect(submit).toBeDisabled();
     choose(dialog, /^Algorithm/, "3DES");
     expect(

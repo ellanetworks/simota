@@ -26,14 +26,12 @@ import (
 
 const callerTraceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
-// failingStore is the store, whose cards cannot be listed.
 type failingStore struct{ *db.DB }
 
 func (failingStore) ListCards(context.Context, int, int) ([]db.Card, int, error) {
 	return nil, 0, errors.New("database is locked")
 }
 
-// tracedAPI is the API traced to a span recorder, with its logs in a buffer.
 type tracedAPI struct {
 	handler http.Handler
 	spans   *tracetest.SpanRecorder
@@ -71,7 +69,6 @@ func (a tracedAPI) serve(t *testing.T, method, path, traceparent string) int {
 	return rec.Code
 }
 
-// attr is the value of a span's attribute key, if it has it.
 func attr(s sdktrace.ReadOnlySpan, key attribute.Key) (attribute.Value, bool) {
 	set := attribute.NewSet(s.Attributes()...)
 	return set.Value(key)
@@ -90,8 +87,6 @@ func openStore(t *testing.T) *db.DB {
 	return store
 }
 
-// TestRequestSpan checks that a request to the API has a server span named by its route, without a parent but with a
-// link to the caller's trace context.
 func TestRequestSpan(t *testing.T) {
 	a := newTracedAPI(t, openStore(t))
 
@@ -118,7 +113,6 @@ func TestRequestSpan(t *testing.T) {
 		t.Errorf("links = %+v, want one to the caller's trace context", links)
 	}
 
-	// A 404 is the client's: the span is not an error.
 	if s.Status().Code != codes.Unset {
 		t.Errorf("status = %+v", s.Status())
 	}
@@ -128,7 +122,6 @@ func TestRequestSpan(t *testing.T) {
 	}
 }
 
-// TestUntraced checks that the UI's files, the probes and the OpenAPI document have no span.
 func TestUntraced(t *testing.T) {
 	a := newTracedAPI(t, openStore(t))
 
@@ -141,8 +134,6 @@ func TestUntraced(t *testing.T) {
 	}
 }
 
-// TestFailedRequestSpan checks that a request that fails is an error of its span, with error.type its status, and that
-// its cause, logged, carries the span's trace context.
 func TestFailedRequestSpan(t *testing.T) {
 	a := newTracedAPI(t, failingStore{openStore(t)})
 
@@ -173,8 +164,6 @@ func TestFailedRequestSpan(t *testing.T) {
 	}
 }
 
-// TestJobCreationContext checks that the store's operations for a request are children of its span, and that the jobs
-// it creates keep its trace context, which the spans that run them link to.
 func TestJobCreationContext(t *testing.T) {
 	spans := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))

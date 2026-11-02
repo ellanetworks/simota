@@ -1,4 +1,3 @@
-// Package config loads simota's configuration file.
 package config
 
 import (
@@ -29,13 +28,11 @@ type DB struct {
 	Path string `yaml:"path"`
 }
 
-// API is where the API and the UI listen. They have no authentication, so the address is best a loopback one.
 type API struct {
 	Address netip.Addr `yaml:"address"`
 	Port    int        `yaml:"port"`
 }
 
-// Telemetry exports traces over OTLP/gRPC to OTLPEndpoint, a host:port, when Enabled.
 type Telemetry struct {
 	Enabled      bool   `yaml:"enabled"`
 	OTLPEndpoint string `yaml:"otlp_endpoint"`

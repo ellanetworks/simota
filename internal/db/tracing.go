@@ -17,10 +17,8 @@ import (
 
 const tracerName = "github.com/ellanetworks/simota/internal/db"
 
-// Option configures a DB.
 type Option func(*DB)
 
-// WithTracerProvider traces the operations of the store with tp, when not nil.
 func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(d *DB) {
 		if tp != nil {
@@ -29,17 +27,11 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 	}
 }
 
-// operation is a logical operation of the store, which an exported method makes: a span of the database client
-// conventions, named by its query summary (OpenTelemetry semantic conventions, database spans).
 type operation struct {
 	summary string
 	attrs   []attribute.KeyValue
 }
 
-// newOperation is the operation of query summary summary: the operations and their targets, in the order the method
-// runs its statements, "{operation1} {target1} {operation2} {target2} ...". Its db.operation.name is the one
-// operation it may have, and its db.collection.name the one table, as the conventions want them only for a call with a
-// single one.
 func newOperation(summary string) operation {
 	words := strings.Fields(summary)
 	if len(words) == 0 || len(words)%2 != 0 {
@@ -64,7 +56,6 @@ func newOperation(summary string) operation {
 	return operation{summary: summary, attrs: attrs}
 }
 
-// The operations of the exported methods.
 var (
 	opCreateCard   = newOperation("INSERT cards INSERT key_sets DELETE key_sets")
 	opNextCounter  = newOperation("UPDATE key_sets")
@@ -88,20 +79,14 @@ var (
 	opPutSMSC      = newOperation("SELECT smsc INSERT smsc")
 )
 
-// start starts the client span of an operation, only within a span of the caller: the store is called for a request,
-// a job or a deliver_sm, whose span it is part of, and also by the runner's poll for jobs, every few seconds, which
-// is no trace of its own.
 func (d *DB) start(ctx context.Context, op operation) (context.Context, trace.Span) {
 	if d.tracer == nil || !trace.SpanContextFromContext(ctx).IsValid() {
-		// A span of no operation, which end does not mistake for the caller's.
 		return ctx, noop.Span{}
 	}
 
 	return d.tracer.Start(ctx, op.summary, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(op.attrs...))
 }
 
-// end ends the span of an operation, which failed with err, if any. The outcomes that the store reports by design, such
-// as a job not found or a card busy, are the caller's to judge, not failures of the database.
 func end(span trace.Span, err error) {
 	defer span.End()
 
@@ -126,7 +111,6 @@ func end(span trace.Span, err error) {
 	span.SetStatus(codes.Error, err.Error())
 }
 
-// expected reports whether err is an outcome that the store reports by design.
 func expected(err error) bool {
 	for _, e := range []error{ErrNotFound, ErrAlreadyExists, ErrBusy, ErrIMSIMismatch, ErrCounterExhausted} {
 		if errors.Is(err, e) {
@@ -137,8 +121,6 @@ func expected(err error) bool {
 	return false
 }
 
-// traceParent is the traceparent to store with what ctx creates, read before the span of the operation starts, which
-// would otherwise be stored instead of the caller's: NULL when ctx is not traced.
 func traceParent(ctx context.Context) any {
 	return nullString(tracing.TraceParent(ctx))
 }

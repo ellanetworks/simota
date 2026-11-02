@@ -32,7 +32,6 @@ const columns: GridColDef<Job>[] = [
     valueFormatter: (value: string) => formatTimestamp(value),
   },
   { field: "iccid", headerName: "Card", width: 200 },
-  // The text columns of variable length share the spare width, so that none is cut while there is room.
   {
     field: "operation",
     headerName: "Operation",
@@ -85,7 +84,6 @@ export default function Jobs() {
     refetchInterval: JOBS_REFRESH_MS,
   });
   const { data, isFetching } = jobs;
-  // Jobs wait for an SMSC: creating one needs it set.
   const smscUnset = useQuery(smscQuery).data?.password_set === false;
 
   return (

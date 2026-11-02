@@ -15,7 +15,6 @@ const unknown = card({ iccid: "8949440000001659232", imsi: undefined });
 
 type Call = { path: string; body: unknown };
 
-// serve answers the cards, and the jobs that create answers, or its error.
 const serve = (
   create: (body: { iccids: string[] }) => Response = (body) =>
     json(201, {
@@ -55,7 +54,6 @@ const open = async (iccids?: string[]) => {
   const onClose = vi.fn();
   renderWithClient(<NewJobDialog iccids={iccids} onClose={onClose} />);
   const dialog = screen.getByRole("dialog", { name: "New Job" });
-  // The cards are loaded once the input says what they need.
   await within(dialog).findByText(
     "A card needs an MSISDN, and may have one job in progress.",
   );
@@ -84,7 +82,6 @@ const type = (dialog: HTMLElement, name: RegExp, value: string) =>
     target: { value },
   });
 
-// create is the dialog's submit button, which an IMSI write names as it.
 const create = (dialog: HTMLElement) =>
   within(dialog).getByRole("button", { name: /^(Create|Write IMSI)$/ });
 
@@ -207,7 +204,6 @@ describe("NewJobDialog", () => {
     fireEvent.click(create(dialog));
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    // The access technologies are sent in the order of the API, whatever the order they were checked in.
     expect(calls[0].body).toMatchObject({
       access: [
         "utran",
@@ -356,7 +352,6 @@ describe("NewJobDialog", () => {
 
     choose(dialog, /^Operation/, "Write IMSI");
     type(dialog, /^New IMSI/, "001010000000002");
-    // Not until it is as long as the IMSI on record.
     type(dialog, /^Current IMSI/, "00101000");
     expect(
       within(dialog).queryByText("Not the card's IMSI on record."),

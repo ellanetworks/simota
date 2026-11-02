@@ -53,7 +53,6 @@ func TestLoadRejects(t *testing.T) {
 		{"db:\n  path: simota.db\n", "api.address"},
 		{base + "  port: 70000\n", "api.port"},
 		{"db:\n  path: simota.db\napi:\n  address: localhost\n", "parse config"},
-		// The SMSC is set over the API, not in the file.
 		{base + "smsc:\n  url: http://127.0.0.1:5010\n", "smsc"},
 		{base + "telemetry:\n  enabled: true\n", "telemetry.otlp_endpoint"},
 	} {

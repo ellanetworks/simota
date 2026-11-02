@@ -13,7 +13,6 @@ import (
 	"github.com/ellanetworks/simota/internal/gateway"
 )
 
-// fakeGateway records the settings applied, and shows the state the test sets.
 type fakeGateway struct {
 	mu      sync.Mutex
 	applied []gateway.Settings
@@ -47,7 +46,6 @@ func (f *fakeGateway) State() gateway.State {
 const smscBody = `{"host":"127.0.0.1","port":2775,"tls":false,"system_id":"simota","password":"secret",` +
 	`"originator":"+15550001000","validity_seconds":86400}`
 
-// smscResult decodes GET or PUT /api/v1/smsc.
 func smscResult(t *testing.T, body string) map[string]any {
 	t.Helper()
 
@@ -62,7 +60,6 @@ func smscResult(t *testing.T, body string) map[string]any {
 func TestSMSC(t *testing.T) {
 	e := newEnv(t)
 
-	// Unset: the defaults, no password, not bound, and no jobs.
 	code, body := e.do(t, http.MethodGet, "/api/v1/smsc", "", "")
 
 	got := smscResult(t, body)
@@ -98,7 +95,6 @@ func TestSMSC(t *testing.T) {
 		t.Fatalf("runner notified %d times, gateway applied %+v", *e.notified, e.gateway.applied)
 	}
 
-	// An update without a password keeps it, and the port defaults to 2775; the password is never returned.
 	code, body = e.do(t, http.MethodPut, "/api/v1/smsc", "application/json",
 		`{"host":"smsc.example","tls":true,"system_id":"ota","originator":"+15550001000","validity_seconds":3600}`)
 
@@ -113,7 +109,6 @@ func TestSMSC(t *testing.T) {
 		t.Fatalf("applied %+v", a)
 	}
 
-	// GET shows the bind state.
 	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	e.gateway.state = gateway.State{
 		Status: gateway.StatusDisconnected, Since: at, LastError: "Bind refused: ESME_RBINDFAIL",
@@ -157,7 +152,6 @@ func TestSMSCRejects(t *testing.T) {
 		strings.Replace(smscBody, `"secret"`, `"sécret"`, 1),
 		strings.Replace(smscBody, "+15550001000", "15550001000", 1),
 		strings.Replace(smscBody, "86400", "0", 1),
-		// L3: at most 99 days, so that the relative validity_period stays normalised.
 		strings.Replace(smscBody, "86400", "8553601", 1),
 		strings.Replace(smscBody, `"validity_seconds"`, `"url":"http://x","validity_seconds"`, 1),
 	} {
@@ -171,7 +165,6 @@ func TestSMSCRejects(t *testing.T) {
 		t.Fatalf("validity of 99 days = %d %s", code, b)
 	}
 
-	// An IPv6 address and a host name are hosts.
 	for _, host := range []string{"2001:db8::1", "smsc-1.example.com"} {
 		if code, b := e.do(t, http.MethodPut, "/api/v1/smsc", "application/json",
 			strings.Replace(smscBody, `"127.0.0.1"`, `"`+host+`"`, 1)); code != http.StatusOK {

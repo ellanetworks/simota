@@ -5,28 +5,23 @@ import (
 	"fmt"
 )
 
-// maxUserData is the user data of a single SMS of 8-bit data (TS 23.040 clause 9.2.3.24).
+// TS 23.040 clause 9.2.3.24
 const maxUserData = 140
 
-// commandUDH is the user data header of a Command Packet in a single short message: its length, then the CPI as
-// IEIa '70' with a null IEDa (TS 31.115 clause 4.2).
+// TS 31.115 clause 4.2
 var commandUDH = []byte{0x02, 0x70, 0x00}
 
-// counterLength is the length of CNTR (TS 102 225 clause 5.1).
+// ETSI TS 102 225 clause 5.1
 const counterLength = 5
 
-// Command is an application message for the card application at TAR, secured with a key set as SPI asks.
 type Command struct {
-	Keyset Keyset
-	TAR    [3]byte
-	// Counter is the CNTR.
+	Keyset  Keyset
+	TAR     [3]byte
 	Counter uint64
-	// Data is the application message, such as a remote management script (TS 102 226).
-	Data []byte
+	Data    []byte
 }
 
-// Encode returns the TP-UDH and the TP-UD of the SMS-DELIVER that carries c in a single short message (TS 31.115
-// clause 4.2).
+// TS 31.115 clause 4.2
 func (c Command) Encode() (udh, ud []byte, err error) {
 	if err := c.Keyset.validate(); err != nil {
 		return nil, nil, fmt.Errorf("command: %w", err)
@@ -35,8 +30,6 @@ func (c Command) Encode() (udh, ud []byte, err error) {
 	return c.encode(SPI)
 }
 
-// encode is Encode with another SPI, which only its ciphering and whether it has a cryptographic checksum change, for
-// the tests' vectors.
 func (c Command) encode(spi uint16) (udh, ud []byte, err error) {
 	if c.Counter >= 1<<(8*counterLength) {
 		return nil, nil, errors.New("command: counter exceeds 5 octets")
@@ -53,14 +46,12 @@ func (c Command) encode(spi uint16) (udh, ud []byte, err error) {
 	padding := 0
 
 	if ciphered {
-		// Ciphering covers CNTR, PCNTR, the CC and the secured data.
 		if r := (counterLength + 1 + ccLen + len(data)) % c.Keyset.blockSize(); r != 0 {
 			padding = c.Keyset.blockSize() - r
 			data = append(append([]byte{}, data...), make([]byte, padding)...)
 		}
 	}
 
-	// CHL counts SPI to the end of the RC/CC/DS: SPI 2, KIc 1, KID 1, TAR 3, CNTR 5, PCNTR 1.
 	chl := 13 + ccLen
 	cpl := 1 + chl + len(data)
 
@@ -79,7 +70,6 @@ func (c Command) encode(spi uint16) (udh, ud []byte, err error) {
 	var cc []byte
 
 	if ccLen > 0 {
-		// CPL and CHL are part of the checksum in SMS (TS 31.115 clause 4.2).
 		cc, err = c.Keyset.checksum(concat(header, counter, data))
 		if err != nil {
 			return nil, nil, fmt.Errorf("command: %w", err)
@@ -103,7 +93,7 @@ func (c Command) encode(spi uint16) (udh, ud []byte, err error) {
 	return append([]byte{}, commandUDH...), ud, nil
 }
 
-// keyID is KIc or KID: the key version and the algorithm, or zero when unused (TS 102 225 clause 5.1).
+// ETSI TS 102 225 clause 5.1
 func (k Keyset) keyID(used bool) byte {
 	if !used {
 		return 0

@@ -57,7 +57,6 @@ func TestOpenRestrictsAndReopens(t *testing.T) {
 
 	_ = d.Close()
 
-	// A second open finds the schema current and keeps the data.
 	d2, err := db.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -117,7 +116,6 @@ func TestCardCRUD(t *testing.T) {
 		t.Fatalf("delete again = %v, want ErrNotFound", err)
 	}
 
-	// The key sets went with the card: recreating it with one key set leaves no other.
 	if err := d.CreateCard(ctx, card(c.ICCID, 3)); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +156,6 @@ func TestImportCards(t *testing.T) {
 		t.Fatalf("imported over = %+v", got)
 	}
 
-	// A file without the IMSI keeps the card's; a card may have none.
 	noIMSI := card("8988211000000000017", 1, 2)
 	noIMSI.IMSI = ""
 
@@ -192,7 +189,6 @@ func TestImportCards(t *testing.T) {
 		t.Fatalf("cards = %+v, total %d", cards, total)
 	}
 
-	// The second page of one holds the second card, with its own key sets only.
 	cards, total, err = d.ListCards(ctx, 2, 1)
 	if err != nil || total != 2 || len(cards) != 1 || cards[0].ICCID != "8988211000000000025" || len(cards[0].KeySets) != 1 {
 		t.Fatalf("page 2 = %+v, total %d, %v", cards, total, err)
@@ -234,7 +230,6 @@ func TestNextCounter(t *testing.T) {
 		}
 	}
 
-	// Each key set has its own counter (TS 102 225 annex A).
 	if got, _ := d.NextCounter(ctx, "8988211000000000017", 2); got != 1 {
 		t.Fatalf("key set 2 counter = %d", got)
 	}
@@ -247,7 +242,6 @@ func TestNextCounter(t *testing.T) {
 		t.Fatalf("missing key set = %v", err)
 	}
 
-	// A re-import with the same key set versions keeps their counters: they are the card's.
 	if _, _, err := d.ImportCards(ctx, []db.Card{card("8988211000000000017", 1, 2)}); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +267,6 @@ func TestCounterExhausted(t *testing.T) {
 	}
 }
 
-// TestImportKeepsUsableKVN checks that a re-import without the card's selected key set moves it to the file's first.
 func TestImportKeepsUsableKVN(t *testing.T) {
 	ctx := context.Background()
 	d, _ := open(t)
@@ -292,7 +285,6 @@ func TestImportKeepsUsableKVN(t *testing.T) {
 	}
 }
 
-// TestJobSteps checks a job's life: created with its card's TAR and KVN, sent, advanced to its next command, finished.
 func TestJobSteps(t *testing.T) {
 	ctx := context.Background()
 	d, _ := open(t)
@@ -314,7 +306,6 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("created = %+v", j)
 	}
 
-	// A change of the card's key set does not change the job's.
 	c.KVN = 2
 
 	c.TAR = []byte{0xb0, 0x00, 0x20}
@@ -326,7 +317,6 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("sent job before it is sent = %v", err)
 	}
 
-	// A failed submit is counted on the queued job.
 	if n, err := d.CountAttempt(ctx, j.ID); err != nil || n != 1 {
 		t.Fatalf("CountAttempt = %d, %v", n, err)
 	}
@@ -344,7 +334,6 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("sent = %+v", j)
 	}
 
-	// A receipt finds the job by its message_id; a PoR by the card's MSISDN and the job's TAR.
 	if got, err := d.SentJob(ctx, "55"); err != nil || got.ID != j.ID {
 		t.Fatalf("SentJob = %+v, %v", got, err)
 	}
@@ -376,12 +365,10 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("advanced = %+v", j)
 	}
 
-	// Sending the command started its count again.
 	if n, err := d.CountAttempt(ctx, j.ID); err != nil || n != 1 {
 		t.Fatalf("CountAttempt of the next command = %d, %v", n, err)
 	}
 
-	// A job closed without its PoR still awaits it, and a late PoR revises it.
 	j.Status, j.Error, j.PoRMissing = db.JobUnconfirmed, "no PoR", true
 	if err := d.FinishJob(ctx, j); err != nil {
 		t.Fatal(err)
@@ -396,7 +383,6 @@ func TestJobSteps(t *testing.T) {
 		t.Fatalf("AwaitingPoR of a job closed without its PoR = %+v, %v", got, err)
 	}
 
-	// Only the PoR of the last command's counter revises it.
 	stale := j
 	stale.Counter, stale.Status = 6, db.JobSucceeded
 
@@ -422,8 +408,6 @@ func TestJobSteps(t *testing.T) {
 	}
 }
 
-// TestIMSIWrite checks that an IMSI write is queued only for the IMSI on record that it names, and that it becomes
-// the card's IMSI on record when it succeeds, not otherwise.
 func TestIMSIWrite(t *testing.T) {
 	ctx := context.Background()
 	d, _ := open(t)
@@ -437,7 +421,6 @@ func TestIMSIWrite(t *testing.T) {
 
 	write := db.Job{ICCID: c.ICCID, Operation: db.OperationIMSIWrite, IMSI: "001010000000002", PreviousIMSI: "001010000000001"}
 
-	// Without an IMSI on record, then with another one.
 	for _, imsi := range []string{"", "001010000000009"} {
 		c.IMSI = imsi
 		if err := d.UpdateCard(ctx, c); err != nil {
@@ -492,7 +475,6 @@ func TestIMSIWrite(t *testing.T) {
 		t.Fatalf("after a write succeeded, IMSI = %s", imsi())
 	}
 
-	// Another job that succeeds does not touch it.
 	ids, err := d.CreateJobs(ctx, []db.Job{{ICCID: c.ICCID, Operation: db.OperationOPLMNRead}})
 	if err != nil {
 		t.Fatal(err)
@@ -523,13 +505,11 @@ func TestSMSC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An update without a password keeps it.
 	want.Host, want.Port, want.TLS, want.Validity = "smsc.example", 3550, true, 24*time.Hour
 
 	update := want
 	update.Password = ""
 
-	// PutSMSC returns the SMSC as stored, with the password kept.
 	if got, err := d.PutSMSC(ctx, update); err != nil || got != want {
 		t.Fatalf("PutSMSC = %+v, %v, want %+v", got, err, want)
 	}
@@ -538,8 +518,6 @@ func TestSMSC(t *testing.T) {
 		t.Fatalf("SMSC = %+v, %v, want %+v", got, err, want)
 	}
 
-	// The schema refuses what SMPP cannot carry: a system_id of 16 characters, a password of 9 (SMPP 3.4 section
-	// 4.1.1, table 4-1).
 	for _, bad := range []db.SMSC{
 		{Host: "h", Port: 2775, SystemID: "0123456789abcdef", Password: "pw", Validity: time.Hour},
 		{Host: "h", Port: 2775, SystemID: "simota", Password: "123456789", Validity: time.Hour},

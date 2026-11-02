@@ -16,50 +16,39 @@ import (
 )
 
 const (
-	// defaultValiditySeconds is the validity of an SMSC not set yet: a day bounds how long an unreachable card holds
-	// its job.
 	defaultValiditySeconds = 24 * 60 * 60
-	// defaultPort is the port IANA registers for SMPP, which SMPP 3.4 does not name.
-	defaultPort = 2775
-	// maxSystemID and maxPassword are the longest system_id and password of a bind, without their NULL terminator
-	// (SMPP 3.4 section 4.1.1, table 4-1).
+	defaultPort            = 2775
+	// SMPP 3.4 section 4.1.1 table 4-1
 	maxSystemID = 15
 	maxPassword = 8
 )
 
 var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
-// SMSCSettings is the SMSC without its password, which the API never returns, and the state of simota's bind to it.
 type SMSCSettings struct {
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	TLS             bool   `json:"tls"`
-	SystemID        string `json:"system_id"`
-	Originator      string `json:"originator"`
-	ValiditySeconds int64  `json:"validity_seconds"`
-	// PasswordSet is whether a password is set: the SMSC is usable.
-	PasswordSet bool      `json:"password_set"`
-	Bind        BindState `json:"bind"`
+	Host            string    `json:"host"`
+	Port            int       `json:"port"`
+	TLS             bool      `json:"tls"`
+	SystemID        string    `json:"system_id"`
+	Originator      string    `json:"originator"`
+	ValiditySeconds int64     `json:"validity_seconds"`
+	PasswordSet     bool      `json:"password_set"`
+	Bind            BindState `json:"bind"`
 }
 
-// BindState is simota's SMPP session to the SMSC.
 type BindState struct {
-	// Status is unset, connecting, bound or disconnected, since Since.
-	Status   string    `json:"status"`
-	Since    time.Time `json:"since"`
-	SystemID string    `json:"smsc_system_id,omitempty"`
-	// LastError is the last failure to connect, to bind, or of the session, at LastErrorAt.
+	Status      string     `json:"status"`
+	Since       time.Time  `json:"since"`
+	SystemID    string     `json:"smsc_system_id,omitempty"`
 	LastError   string     `json:"last_error,omitempty"`
 	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
 }
 
 type SMSCParams struct {
-	Host string `json:"host"`
-	// Port is 2775 when absent.
-	Port     int    `json:"port"`
-	TLS      bool   `json:"tls"`
-	SystemID string `json:"system_id"`
-	// Password replaces the password set; empty keeps it.
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	TLS             bool   `json:"tls"`
+	SystemID        string `json:"system_id"`
 	Password        string `json:"password"`
 	Originator      string `json:"originator"`
 	ValiditySeconds int64  `json:"validity_seconds"`
@@ -84,7 +73,6 @@ func GetSMSC(cfg Config) http.Handler {
 	})
 }
 
-// printable reports whether s is printable ASCII, as SMPP's C-Octet Strings of system_id and password carry it.
 func printable(s string) bool {
 	for i := range len(s) {
 		if s[i] < 0x20 || s[i] > 0x7e {
@@ -157,11 +145,8 @@ func UpdateSMSC(cfg Config) http.Handler {
 			return
 		}
 
-		// The settings are stored: the session must take them though the client goes away, so what follows does
-		// not end with the request, and keeps its values, such as its trace.
 		ctx := context.WithoutCancel(r.Context())
 
-		// The session binds again only when its connection settings changed.
 		if cfg.Gateway != nil {
 			if err := cfg.Gateway.Apply(ctx, new(gateway.SettingsOf(updated))); err != nil {
 				cfg.Logger.ErrorContext(ctx, "failed to connect to the SMSC", slog.Any("error", err))
@@ -176,8 +161,7 @@ func UpdateSMSC(cfg Config) http.Handler {
 	})
 }
 
-// maxValiditySeconds is the longest validity, 99 days: the most that simota's relative validity_period tells (SMPP
-// 3.4 section 7.1.1.2), which an SMSC may limit further (section 7.1.1.2, note).
+// SMPP 3.4 section 7.1.1.2
 const maxValiditySeconds = int64(jobs.MaxValidity / time.Second)
 
 func bindState(cfg Config) BindState {

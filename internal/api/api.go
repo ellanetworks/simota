@@ -1,4 +1,3 @@
-// Package api serves simota's REST API and its web UI.
 package api
 
 import (
@@ -34,31 +33,24 @@ type Store interface {
 }
 
 type Config struct {
-	Store    Store
-	Frontend fs.FS
-	Version  string
-	// Notify, when set, tells the job runner that jobs are queued or the SMSC changed.
-	Notify func()
-	// Ready, when set, tells whether simota can serve requests: nil, or what is wrong.
-	Ready func(ctx context.Context) error
-	// Gateway, when set, is the SMPP session to the SMSC: PUT /api/v1/smsc applies its settings, GET shows its state.
-	Gateway Gateway
-	// TracerProvider, when set, traces the requests to the API.
+	Store          Store
+	Frontend       fs.FS
+	Version        string
+	Notify         func()
+	Ready          func(ctx context.Context) error
+	Gateway        Gateway
 	TracerProvider trace.TracerProvider
 	Logger         *slog.Logger
 }
 
-// Gateway is the SMPP session to the SMSC.
 type Gateway interface {
 	Apply(ctx context.Context, s *gateway.Settings) error
 	State() gateway.State
 }
 
 const (
-	// maxImportBody bounds a key file, of some thousands of cards.
 	maxImportBody = 16 << 20
-	// maxBody bounds the other request bodies.
-	maxBody = 64 << 10
+	maxBody       = 64 << 10
 
 	defaultPerPage = 25
 	maxPerPage     = 100
@@ -91,15 +83,12 @@ func NewHandler(cfg Config) http.Handler {
 	return traced(cfg.TracerProvider, mux)
 }
 
-// Livez tells the kubelet that the process serves HTTP. It checks nothing else, so that a failing database fails
-// readiness and does not restart simota.
 func Livez() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
 
-// Readyz tells whether simota can serve requests: 204 when cfg.Ready finds nothing wrong, 503 otherwise.
 func Readyz(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg.Ready != nil {
@@ -144,12 +133,10 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// SuccessResponse is the response to a change that returns nothing else.
 type SuccessResponse struct {
 	Message string `json:"message"`
 }
 
-// decodeBody decodes a JSON request body into v, refusing unknown fields, and answers 400 when it cannot.
 func decodeBody(w http.ResponseWriter, r *http.Request, v any, cfg Config) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()
@@ -198,8 +185,6 @@ func writeResponse(w http.ResponseWriter, r *http.Request, v any, status int, lo
 	writeJSON(w, r, Response{Result: v}, status, logger)
 }
 
-// writeError answers the request with status and message, and logs err in the request's context: as an error for a
-// 5xx, which is simota's, and at debug level otherwise, which is the client's.
 func writeError(w http.ResponseWriter, r *http.Request, status int, message string, err error, logger *slog.Logger) {
 	if status >= 500 {
 		logger.ErrorContext(r.Context(), message, slog.Any("error", err))
@@ -227,7 +212,6 @@ func writeJSON(w http.ResponseWriter, r *http.Request, v any, status int, logger
 	}
 }
 
-// Frontend serves the web UI: its files, and its index for the other paths outside the API, which the UI routes.
 func Frontend(fsys fs.FS) http.Handler {
 	files := http.FileServerFS(fsys)
 

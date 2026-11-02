@@ -18,7 +18,6 @@ const (
 	spanID  = "b7ad6b7169203331"
 )
 
-// traced is a context with a sampled span context.
 func traced(t *testing.T) context.Context {
 	t.Helper()
 
@@ -37,7 +36,6 @@ func traced(t *testing.T) context.Context {
 	}))
 }
 
-// record logs one record with log and decodes it.
 func record(t *testing.T, log func(l *slog.Logger)) map[string]any {
 	t.Helper()
 
@@ -72,9 +70,8 @@ func TestFormat(t *testing.T) {
 
 func TestTraceContext(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		log  func(ctx context.Context, l *slog.Logger)
-		// check checks the record but for its trace context.
+		name  string
+		log   func(ctx context.Context, l *slog.Logger)
 		check func(m map[string]any) bool
 	}{
 		{
@@ -106,13 +103,11 @@ func TestTraceContext(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// With a span context, the trace context is at the top level.
 			m := record(t, func(l *slog.Logger) { tc.log(traced(t), l) })
 			if !hasTrace(m) || !tc.check(m) {
 				t.Errorf("traced record = %v", m)
 			}
 
-			// Without one, the record has none.
 			m = record(t, func(l *slog.Logger) { tc.log(context.Background(), l) })
 			if m[logging.TraceIDKey] != nil || m[logging.SpanIDKey] != nil || m[logging.TraceFlagsKey] != nil || !tc.check(m) {
 				t.Errorf("untraced record = %v", m)
@@ -121,7 +116,6 @@ func TestTraceContext(t *testing.T) {
 	}
 }
 
-// TestEnabled checks that the handler filters by level as the one it wraps.
 func TestEnabled(t *testing.T) {
 	var buf bytes.Buffer
 

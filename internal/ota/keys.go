@@ -9,35 +9,28 @@ import (
 	"fmt"
 )
 
-// Algorithm is the algorithm of a key set, coded in the low nibble of KIc and KID (TS 102 225 clauses 5.1.2, 5.1.3).
+// ETSI TS 102 225 clause 5.1.2
+// ETSI TS 102 225 clause 5.1.3
 type Algorithm uint8
 
 const (
-	// TripleDES is triple DES in outer CBC mode with two keys: CBC for KIc, CBC-MAC for KID.
 	TripleDES Algorithm = 0x5
-	// AES is AES in CBC mode for KIc, and in CMAC mode for KID.
-	AES Algorithm = 0x2
+	AES       Algorithm = 0x2
 )
 
-// ccLength is the length of a cryptographic checksum by default: the triple DES one, and the longer AES one, which
-// may be 4 or 8 octets (TS 102 225 clause 5.1.3.1).
+// ETSI TS 102 225 clause 5.1.3.1
 const ccLength = 8
 
 var ErrIntegrity = errors.New("cryptographic checksum mismatch")
 
-// Keyset is a key set of a card's security domain for SCP80: its Key Version Number, its algorithm, and its ciphering
-// (KIc) and integrity (KID) keys.
 type Keyset struct {
 	Version   uint8
 	Algorithm Algorithm
 	KIc       []byte
 	KID       []byte
-	// CCLength is the length of the cryptographic checksums of an AES key set, 4 or 8, as the card's key was
-	// configured with; 0 is 8. A triple DES checksum is 8 octets.
-	CCLength int
+	CCLength  int
 }
 
-// ccLen is the length of the key set's cryptographic checksums.
 func (k Keyset) ccLen() int {
 	if k.Algorithm == AES && k.CCLength != 0 {
 		return k.CCLength
@@ -79,7 +72,6 @@ func validAESKey(k []byte) bool {
 	return len(k) == 16 || len(k) == 24 || len(k) == 32
 }
 
-// blockSize is the block size that ciphering pads to.
 func (k Keyset) blockSize() int {
 	if k.Algorithm == AES {
 		return aes.BlockSize
@@ -93,11 +85,9 @@ func (k Keyset) block(key []byte) (cipher.Block, error) {
 		return aes.NewCipher(key)
 	}
 
-	// Two-key triple DES is K1, K2, K1.
 	return des.NewTripleDESCipher(append(append([]byte{}, key...), key[:8]...))
 }
 
-// encrypt ciphers data, a multiple of the block size, in CBC mode with a zero IV.
 func (k Keyset) encrypt(data []byte) ([]byte, error) {
 	b, err := k.block(k.KIc)
 	if err != nil {
@@ -126,8 +116,6 @@ func (k Keyset) decrypt(data []byte) ([]byte, error) {
 	return out, nil
 }
 
-// checksum is the cryptographic checksum of data: the last block of a CBC-MAC over data padded with zeros for triple
-// DES, or AES-CMAC (RFC 4493) truncated to its first CCLength octets.
 func (k Keyset) checksum(data []byte) ([]byte, error) {
 	b, err := k.block(k.KID)
 	if err != nil {
@@ -158,7 +146,6 @@ func (k Keyset) verify(data, cc []byte) error {
 	return nil
 }
 
-// pad appends zeros to data up to a multiple of size.
 func pad(data []byte, size int) []byte {
 	if r := len(data) % size; r != 0 {
 		return append(append([]byte{}, data...), make([]byte, size-r)...)
@@ -167,7 +154,7 @@ func pad(data []byte, size int) []byte {
 	return data
 }
 
-// cmac is the AES-CMAC of data (RFC 4493).
+// RFC 4493
 func cmac(b cipher.Block, data []byte) []byte {
 	const rb = 0x87
 

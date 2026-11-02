@@ -14,7 +14,6 @@ import (
 	"github.com/ellanetworks/simota/internal/rfm"
 )
 
-// maxJobCards bounds the cards of one request.
 const maxJobCards = 100
 
 var (
@@ -23,58 +22,46 @@ var (
 )
 
 type CreateJobsParams struct {
-	ICCIDs    []string `json:"iccids"`
-	Operation string   `json:"operation"`
-	// Slot is the entry, from 1, of a set or a clear; MCC, MNC and Access are the entry of a set.
-	Slot   int      `json:"slot"`
-	MCC    string   `json:"mcc"`
-	MNC    string   `json:"mnc"`
-	Access []string `json:"access"`
-	// IMSI is the IMSI an IMSI write writes, and PreviousIMSI the IMSI it replaces, which must be the card's IMSI on
-	// record: the operator states which subscription the card leaves.
-	IMSI         string `json:"imsi"`
-	PreviousIMSI string `json:"previous_imsi"`
+	ICCIDs       []string `json:"iccids"`
+	Operation    string   `json:"operation"`
+	Slot         int      `json:"slot"`
+	MCC          string   `json:"mcc"`
+	MNC          string   `json:"mnc"`
+	Access       []string `json:"access"`
+	IMSI         string   `json:"imsi"`
+	PreviousIMSI string   `json:"previous_imsi"`
 }
 
 type Job struct {
-	ID        int64    `json:"id"`
-	ICCID     string   `json:"iccid"`
-	Operation string   `json:"operation"`
-	Slot      int      `json:"slot,omitempty"`
-	MCC       string   `json:"mcc,omitempty"`
-	MNC       string   `json:"mnc,omitempty"`
-	Access    []string `json:"access,omitempty"`
-	// AccessRaw is the Access Technology Identifier of a set, in hexadecimal.
-	AccessRaw string `json:"access_raw,omitempty"`
-	// IMSI and PreviousIMSI are those of an IMSI write; IMSIReadBack is the IMSI that EF.IMSI read back after it.
-	IMSI         string `json:"imsi,omitempty"`
-	PreviousIMSI string `json:"previous_imsi,omitempty"`
-	IMSIReadBack string `json:"imsi_read_back,omitempty"`
-	// TAR and KVN are those the job's commands use.
-	TAR    string `json:"tar"`
-	KVN    int    `json:"kvn"`
-	Status string `json:"status"`
-	// Step is the number of commands answered, and FileSize the size of EF.OPLMNwAcT once read.
-	Step      int    `json:"step"`
-	FileSize  *int   `json:"file_size,omitempty"`
-	Counter   uint64 `json:"counter,omitempty"`
-	MessageID string `json:"message_id,omitempty"`
-	// PoRStatus is the Response Status Code of the card's PoR, such as por_ok.
-	PoRStatus string `json:"por_status,omitempty"`
-	// StatusWord is that of the script's last command, in hexadecimal; Warning is one that completed with a warning.
-	StatusWord string `json:"status_word,omitempty"`
-	Warning    bool   `json:"warning,omitempty"`
-	// Entries are EF.OPLMNwAcT as the card read it after the job.
-	Entries []Entry `json:"entries,omitempty"`
-	// Command and Response are the user data headers and user data of the secured packets, in hexadecimal.
-	Command   string `json:"command,omitempty"`
-	Response  string `json:"response,omitempty"`
-	Error     string `json:"error,omitempty"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID           int64    `json:"id"`
+	ICCID        string   `json:"iccid"`
+	Operation    string   `json:"operation"`
+	Slot         int      `json:"slot,omitempty"`
+	MCC          string   `json:"mcc,omitempty"`
+	MNC          string   `json:"mnc,omitempty"`
+	Access       []string `json:"access,omitempty"`
+	AccessRaw    string   `json:"access_raw,omitempty"`
+	IMSI         string   `json:"imsi,omitempty"`
+	PreviousIMSI string   `json:"previous_imsi,omitempty"`
+	IMSIReadBack string   `json:"imsi_read_back,omitempty"`
+	TAR          string   `json:"tar"`
+	KVN          int      `json:"kvn"`
+	Status       string   `json:"status"`
+	Step         int      `json:"step"`
+	FileSize     *int     `json:"file_size,omitempty"`
+	Counter      uint64   `json:"counter,omitempty"`
+	MessageID    string   `json:"message_id,omitempty"`
+	PoRStatus    string   `json:"por_status,omitempty"`
+	StatusWord   string   `json:"status_word,omitempty"`
+	Warning      bool     `json:"warning,omitempty"`
+	Entries      []Entry  `json:"entries,omitempty"`
+	Command      string   `json:"command,omitempty"`
+	Response     string   `json:"response,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
 }
 
-// Entry is an entry of EF.OPLMNwAcT. An unused one has no MCC.
 type Entry struct {
 	Slot      int      `json:"slot"`
 	MCC       string   `json:"mcc,omitempty"`
@@ -94,7 +81,6 @@ type ListJobsResponse struct {
 	TotalCount int   `json:"total_count"`
 }
 
-// CreateJobs queues a job per card.
 func CreateJobs(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var p CreateJobsParams
@@ -121,7 +107,6 @@ func CreateJobs(cfg Config) http.Handler {
 			return
 		}
 
-		// An IMSI is a single subscription's: it is written to one card.
 		if template.Operation == db.OperationIMSIWrite && len(p.ICCIDs) != 1 {
 			writeError(w, r, http.StatusBadRequest, "An IMSI write takes one card", nil, cfg.Logger)
 			return
@@ -182,7 +167,6 @@ func CreateJobs(cfg Config) http.Handler {
 			return
 		}
 
-		// The jobs are queued: the runner sends them though the response below fails, or the client goes away.
 		if cfg.Notify != nil {
 			cfg.Notify()
 		}
@@ -331,7 +315,6 @@ func jobResponse(j db.Job) Job {
 
 	switch {
 	case j.Operation == db.OperationIMSIWrite:
-		// A read-back that differs from the IMSI written is shown too: it is what the card holds.
 		out.IMSIReadBack, _ = rfm.DecodeIMSI(j.Data)
 	case j.Status == db.JobSucceeded || j.Status == db.JobUnconfirmed:
 		out.Entries = entriesOf(j)
@@ -340,7 +323,6 @@ func jobResponse(j db.Job) Job {
 	return out
 }
 
-// entriesOf are the entries a job read: the whole file for a read, the slot read back for a set or a clear.
 func entriesOf(j db.Job) []Entry {
 	entries, err := rfm.DecodeSelector(j.Data)
 	if err != nil {

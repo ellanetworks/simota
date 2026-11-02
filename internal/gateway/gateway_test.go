@@ -11,7 +11,6 @@ import (
 	"github.com/ellanetworks/smsc/smpp"
 )
 
-// smsc is an SMSC on a loopback port that accepts the password "secret", and records the system_id of each bind.
 func smsc(t *testing.T) (int, func() []string) {
 	t.Helper()
 
@@ -103,7 +102,6 @@ func TestGateway(t *testing.T) {
 		t.Fatalf("SubmitSM = %q, %v", id, err)
 	}
 
-	// The same settings again keep the session.
 	same := s
 	if err := g.Apply(t.Context(), &same); err != nil {
 		t.Fatal(err)
@@ -113,7 +111,6 @@ func TestGateway(t *testing.T) {
 		t.Fatalf("%d binds after the same settings", n)
 	}
 
-	// A wrong password: the session is replaced, and the refusal shows.
 	s.Password = "wrong"
 	if err := g.Apply(t.Context(), &s); err != nil {
 		t.Fatal(err)
@@ -125,7 +122,6 @@ func TestGateway(t *testing.T) {
 		t.Fatalf("refused state %+v", st)
 	}
 
-	// Unset.
 	if err := g.Apply(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +130,6 @@ func TestGateway(t *testing.T) {
 		t.Fatalf("state %+v", st)
 	}
 
-	// Settings that cannot bind are refused at once.
 	if err := g.Apply(t.Context(), &gateway.Settings{Host: "127.0.0.1", Port: port, SystemID: "simota", Password: "123456789"}); err == nil {
 		t.Fatal("a password of 9 characters was applied")
 	}

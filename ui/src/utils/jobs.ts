@@ -5,7 +5,6 @@ import type {
   JobStatus,
 } from "@/queries/jobs";
 
-// ACCESS_TECHNOLOGIES are those a phone of a private network uses; MORE_ACCESS_TECHNOLOGIES the others.
 export const ACCESS_TECHNOLOGIES: AccessTechnology[] = [
   "utran",
   "eutran_wb_s1",
@@ -24,7 +23,6 @@ export const MORE_ACCESS_TECHNOLOGIES: AccessTechnology[] = [
   "cdma2000_1xrtt",
 ];
 
-// ALL_ACCESS_TECHNOLOGIES are in the order of the API.
 export const ALL_ACCESS_TECHNOLOGIES: AccessTechnology[] = [
   "utran",
   "eutran_wb_s1",
@@ -68,8 +66,6 @@ export const operationLabels: Record<JobOperation, string> = {
   imsi_write: "Write IMSI",
 };
 
-// accessLabel is a list of access technologies, with their identifier in hex when it is known, such as
-// "E-UTRAN WB-S1, NG-RAN (4800)".
 export const accessLabel = (
   access: AccessTechnology[] = [],
   raw?: string,
@@ -78,11 +74,9 @@ export const accessLabel = (
   return raw ? `${labels} (${raw})` : labels;
 };
 
-// plmnLabel is a PLMN as MCC/MNC, such as 999/99.
 export const plmnLabel = (mcc?: string, mnc?: string): string =>
   mcc ? `${mcc}/${mnc ?? ""}` : "—";
 
-// jobLabel is what a job does, such as "Set slot 2 to 999/99 (E-UTRAN, NG-RAN)".
 export const jobLabel = (job: Job): string => {
   switch (job.operation) {
     case "oplmn_set":
@@ -96,8 +90,8 @@ export const jobLabel = (job: Job): string => {
   }
 };
 
-// porCodes are the Response Status Codes of a PoR, by their name in the API, with their label (TS 102 225 table 5,
-// TS 31.115 clause 7). The server's job errors use the same words.
+// ETSI TS 102 225 clause 5.2
+// TS 31.115 clause 7
 const porCodes: Record<string, [code: string, label: string]> = {
   por_ok: ["00", "OK"],
   rc_cc_ds_failed: ["01", "Checksum failed"],
@@ -114,8 +108,6 @@ const porCodes: Record<string, [code: string, label: string]> = {
   response_in_ussd: ["0C", "Answer by USSD"],
 };
 
-// porCode is a PoR status as its code in hex and its label, such as ["02", "Counter too low"]; proprietary_c0 is
-// ["C0", "Proprietary C0"].
 const porCode = (status: string): [code: string, label: string] => {
   const known = porCodes[status];
   if (known) return known;
@@ -128,19 +120,15 @@ const porCode = (status: string): [code: string, label: string] => {
   ];
 };
 
-// porLabel is a PoR status in words, such as "Counter too low", or a dash.
 export const porLabel = (status?: string): string =>
   status ? porCode(status)[1] : "—";
 
-// porDetail is a PoR status with its code, such as "Counter too low (02)". A proprietary or reserved code is in its
-// label already.
 export const porDetail = (status?: string): string => {
   if (!status) return "—";
   const [code, label] = porCode(status);
   return code && !label.endsWith(code) ? `${label} (${code})` : label;
 };
 
-// MAX_SLOT is the last entry a job may write, as the server allows.
 export const MAX_SLOT = 51;
 
 export const isSlot = (value: string): boolean =>
@@ -160,6 +148,5 @@ export const statusHelp: Record<JobStatus, string> = {
   failed: "Failed: the card did not do it.",
 };
 
-// inProgress tells whether a job still waits for the card.
 export const inProgress = (job: Job): boolean =>
   job.status === "queued" || job.status === "sent";

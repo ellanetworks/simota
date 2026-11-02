@@ -12,7 +12,6 @@ import { formatDuration } from "@/utils/durations";
 
 const orNotSet = (value: string) => value || "Not set";
 
-// Bind is the bind state: a chip, and since when.
 function Bind({ bind }: { bind: BindState }) {
   return (
     <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
@@ -26,7 +25,6 @@ function Bind({ bind }: { bind: BindState }) {
   );
 }
 
-// lastError is the last failure of the session, with its time, or "None".
 const lastError = (bind: BindState) =>
   bind.last_error
     ? `${bind.last_error}${bind.last_error_at ? ` (${formatDateTime(bind.last_error_at)})` : ""}`
@@ -34,7 +32,6 @@ const lastError = (bind: BindState) =>
 
 export default function SMSC() {
   const [editing, setEditing] = useState(false);
-  // The bind state changes on its own: the page reads it again.
   const smsc = useQuery({ ...smscQuery, refetchInterval: BIND_REFRESH_MS });
   const { data, isPending } = smsc;
 
@@ -45,7 +42,6 @@ export default function SMSC() {
         title="SMSC"
         description="The SMSC, such as Ella SMSC, that sends the commands to the cards over SMPP, and pushes back their answers."
         action={
-          // The settings are set together, in one dialog.
           <Button
             variant="contained"
             color="success"

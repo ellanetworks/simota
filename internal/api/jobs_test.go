@@ -50,12 +50,10 @@ func TestCreateJobs(t *testing.T) {
 		t.Fatalf("job = %+v", j)
 	}
 
-	// Once for the SMSC, once for the jobs.
 	if *e.notified != 2 {
 		t.Fatalf("runner notified %d times", *e.notified)
 	}
 
-	// The card already has a job in progress.
 	if code, _ := e.do(t, http.MethodPost, "/api/v1/jobs", "application/json",
 		`{"iccids":["8988211000000000017"],"operation":"oplmn_read"}`); code != http.StatusConflict {
 		t.Fatalf("second job = %d, want 409", code)
@@ -122,7 +120,6 @@ func TestCreateJobsRejects(t *testing.T) {
 	}
 }
 
-// TestJobEntries checks the entries of finished jobs: the file a read read, the slot a set read back.
 func TestJobEntries(t *testing.T) {
 	e := newEnv(t)
 	createCard(t, e, "8988211000000000017", "+15550000001")
@@ -177,8 +174,6 @@ func TestJobEntries(t *testing.T) {
 	}
 }
 
-// TestIMSIWrite checks that an IMSI write takes one card, a valid IMSI, and the card's IMSI on record as the one it
-// replaces; and that the IMSI read back is shown, and becomes the card's when the write succeeds.
 func TestIMSIWrite(t *testing.T) {
 	e := newEnv(t)
 	createCard(t, e, "8988211000000000017", "+15550000001")
@@ -202,7 +197,6 @@ func TestIMSIWrite(t *testing.T) {
 		}
 	}
 
-	// A card without an IMSI on record needs it set first.
 	if code, body := e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000025", "application/json",
 		`{"msisdn":"+15550000002","tar":"b00001","kvn":1}`); code != http.StatusOK {
 		t.Fatalf("clear IMSI = %d %s", code, body)
@@ -252,7 +246,6 @@ func TestIMSIWrite(t *testing.T) {
 	}
 }
 
-// setSMSC sets the SMSC, which jobs need, once.
 func setSMSC(t *testing.T, e env) {
 	t.Helper()
 

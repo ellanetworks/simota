@@ -19,8 +19,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-// TestTraceParentRoundTrip checks that the traceparent of a recorded span links back to it, and that a span simota
-// does not record, such as a caller's trace context while tracing is off, gives none.
 func TestTraceParentRoundTrip(t *testing.T) {
 	tracer := sdktrace.NewTracerProvider().Tracer("test")
 
@@ -57,14 +55,11 @@ func TestTraceParentRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNewProvider checks that the spans name simota and its version, sampled, and that the OTEL_* environment
-// variables do not apply: the configuration file is the only one.
 func TestNewProvider(t *testing.T) {
 	t.Setenv("OTEL_SERVICE_NAME", "simota-west")
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=simota-east")
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 
-	// No collector listens on port 1, so that the test exports nothing.
 	tp, err := tracing.NewProvider(t.Context(), "127.0.0.1:1", "v1.2.3", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +92,6 @@ func TestNewProvider(t *testing.T) {
 	}
 }
 
-// collector is an OTLP/gRPC trace collector that keeps what it receives.
 type collector struct {
 	collectortrace.UnimplementedTraceServiceServer
 
@@ -115,8 +109,6 @@ func (c *collector) Export(_ context.Context, req *collectortrace.ExportTraceSer
 	return &collectortrace.ExportTraceServiceResponse{}, nil
 }
 
-// TestExport checks that the provider exports its spans to the collector at its endpoint, over plain gRPC, and that
-// shutting it down exports the spans left.
 func TestExport(t *testing.T) {
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {

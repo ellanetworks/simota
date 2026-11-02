@@ -1,4 +1,3 @@
-// Package db stores the cards and their OTA key sets in SQLite.
 package db
 
 import (
@@ -25,18 +24,11 @@ func isUnique(err error) bool {
 }
 
 type DB struct {
-	conn *sql.DB
-	now  func() time.Time
-	// tracer traces the operations made within a caller's span, when set.
+	conn   *sql.DB
+	now    func() time.Time
 	tracer trace.Tracer
 }
 
-// migrations are the schema's versions; the first is the schema. A job's por_missing marks it closed without the PoR to
-// its last command, by a receipt or the deadline, which a later PoR of that command's TAR and counter still decides;
-// its attempts count the failed submits of its current command. An IMSI write keeps the IMSI it writes and the card's
-// IMSI on record that it replaces. A job's traceparent is that of the span that created it, and its
-// command_traceparent that of the span that sent its current command, NULL when untraced: the spans that run the job
-// later link to them.
 var migrations = []string{
 	`CREATE TABLE cards (
 		iccid TEXT PRIMARY KEY,
@@ -109,7 +101,6 @@ var migrations = []string{
 	);`,
 }
 
-// Open opens the database at path, creating it readable and writable by its owner only: it holds the cards' keys.
 func Open(ctx context.Context, path string, opts ...Option) (*DB, error) {
 	if err := restrict(path); err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -135,7 +126,6 @@ func Open(ctx context.Context, path string, opts ...Option) (*DB, error) {
 	return d, nil
 }
 
-// Ping tells whether the database answers.
 func (d *DB) Ping(ctx context.Context) error {
 	return d.conn.PingContext(ctx)
 }
@@ -178,8 +168,6 @@ func (d *DB) migrate(ctx context.Context) error {
 	return nil
 }
 
-// restrict creates the database file if absent, readable and writable by its owner only, and makes an existing one
-// so. SQLite gives its journal files the permissions of the database file.
 func restrict(path string) error {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {

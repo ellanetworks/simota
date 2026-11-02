@@ -8,9 +8,6 @@ import (
 	"time"
 )
 
-// SMSC is the SMSC that the OTA messages go through, over SMPP 3.4: its host and port, whether the connection
-// is over TLS, the system_id and password that simota binds with, the address the messages come from, and how long
-// the SMSC attempts their delivery.
 type SMSC struct {
 	Host       string
 	Port       int
@@ -21,7 +18,6 @@ type SMSC struct {
 	Validity   time.Duration
 }
 
-// GetSMSC is the SMSC, or ErrNotFound before one is set.
 func (d *DB) GetSMSC(ctx context.Context) (_ SMSC, err error) {
 	ctx, span := d.start(ctx, opGetSMSC)
 
@@ -47,7 +43,6 @@ func (d *DB) GetSMSC(ctx context.Context) (_ SMSC, err error) {
 	return s, nil
 }
 
-// PutSMSC sets the SMSC, and returns it as stored. An empty password keeps the one set.
 func (d *DB) PutSMSC(ctx context.Context, s SMSC) (_ SMSC, err error) {
 	ctx, span := d.start(ctx, opPutSMSC)
 

@@ -42,7 +42,6 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// sja5 is key set 1 of the lab sysmoISIM-SJA5.
 func sja5(t *testing.T) db.KeySet {
 	return db.KeySet{
 		Version: 1, Algorithm: "3des", KIc: mustHex(t, "2184A42A93F563DB248095A5F539D489"),
@@ -50,9 +49,8 @@ func sja5(t *testing.T) db.KeySet {
 	}
 }
 
-// porPacket is the user data of the card's PoR r, its UDH then its Response Packet, secured with the triple DES key
-// set k as ota.SPI asks: a cryptographic checksum, ciphered (TS 102 225 clause 5.2, TS 31.115 clause 4.4). It is coded
-// apart from package ota, which only decodes PoRs.
+// ETSI TS 102 225 clause 5.2
+// TS 31.115 clause 4.4
 func porPacket(t *testing.T, k ota.Keyset, r ota.Response) []byte {
 	t.Helper()
 
@@ -60,7 +58,6 @@ func porPacket(t *testing.T, k ota.Keyset, r ota.Response) []byte {
 		t.Fatal("porPacket codes triple DES PoRs only")
 	}
 
-	// CBC with a zero IV and two-key triple DES, K1 K2 K1, of data padded with zeros to the block.
 	cbc := func(key, data []byte) []byte {
 		b, err := des.NewTripleDESCipher(slices.Concat(key, key[:8]))
 		if err != nil {
@@ -86,23 +83,18 @@ func porPacket(t *testing.T, k ota.Keyset, r ota.Response) []byte {
 	rpl := 1 + 3 + len(counter) + ccLength + len(data)
 	header := []byte{byte(rpl >> 8), byte(rpl), 10 + ccLength, r.TAR[0], r.TAR[1], r.TAR[2]}
 
-	// The CC covers the UDH, RPL, RHL, TAR, CNTR, PCNTR, the status and the data; ciphering all but the header.
 	mac := cbc(k.KID, slices.Concat(udh, header, counter, data))
 
 	return slices.Concat(udh, header, cbc(k.KIc, slices.Concat(counter, mac[len(mac)-ccLength:], data)))
 }
 
-// fakeSMSC is an SMSC as the runner meets it over SMPP 3.4: a server on a loopback port that the runner's session
-// binds to as a transceiver, which answers each submit_sm with the next message_id, or with the status the test sets,
-// and sends the deliver_sm the test makes it send.
 type fakeSMSC struct {
 	srv *smpp.Server
 
 	mu        sync.Mutex
 	status    smpp.CommandStatus
 	submitted []*smpp.SubmitSM
-	// onSubmit, when set, runs as each submit_sm comes, before the SMSC answers it.
-	onSubmit func()
+	onSubmit  func()
 }
 
 func newFakeSMSC(t *testing.T) (*fakeSMSC, int) {
@@ -171,8 +163,6 @@ func (f *fakeSMSC) sent() []*smpp.SubmitSM {
 	return append([]*smpp.SubmitSM{}, f.submitted...)
 }
 
-// deliver sends a deliver_sm to simota and waits for its deliver_sm_resp, which simota writes once it has recorded
-// it.
 func (f *fakeSMSC) deliver(t *testing.T, d *smpp.DeliverSM) {
 	t.Helper()
 
@@ -181,8 +171,6 @@ func (f *fakeSMSC) deliver(t *testing.T, d *smpp.DeliverSM) {
 	}
 }
 
-// try sends a deliver_sm and returns the error of its deliver_sm_resp: a *smpp.StatusError for a status other than
-// ESME_ROK.
 func (f *fakeSMSC) try(d *smpp.DeliverSM) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -192,7 +180,6 @@ func (f *fakeSMSC) try(d *smpp.DeliverSM) error {
 	return err
 }
 
-// faultyStore is the store with the failures a test sets.
 type faultyStore struct {
 	*db.DB
 
@@ -240,27 +227,21 @@ func (s *faultyStore) MarkJobSent(ctx context.Context, id int64, counter uint64,
 var errDB = errors.New("database is locked")
 
 type env struct {
-	store  *db.DB
-	faults *faultyStore
-	smsc   *fakeSMSC
-	gw     *gateway.Gateway
-	runner *jobs.Runner
-	keyset ota.Keyset
-	msisdn string
-	now    time.Time
-	// validity is the gateway's.
+	store    *db.DB
+	faults   *faultyStore
+	smsc     *fakeSMSC
+	gw       *gateway.Gateway
+	runner   *jobs.Runner
+	keyset   ota.Keyset
+	msisdn   string
+	now      time.Time
 	validity time.Duration
 	settings gateway.Settings
-	// spans records the spans of the store, the gateway and the runner, and tracer starts those of their callers.
-	spans  *tracetest.SpanRecorder
-	tracer trace.Tracer
-	// generic makes the SMSC forward the card's answer as pySim-smpp2sim does, a normal message without UDHI or TLVs,
-	// and send no receipt; otherwise as Ella SMSC does, an SME Manual/User Acknowledgement with UDHI and
-	// receipted_message_id, then a receipt.
-	generic bool
+	spans    *tracetest.SpanRecorder
+	tracer   trace.Tracer
+	generic  bool
 }
 
-// forms runs a test with the SIM answers of both forms.
 func forms(t *testing.T, run func(t *testing.T, generic bool)) {
 	t.Run("ella", func(t *testing.T) { run(t, false) })
 	t.Run("generic", func(t *testing.T) { run(t, true) })
@@ -311,7 +292,6 @@ func newEnv(t *testing.T, msisdn string, keys db.KeySet) *env {
 	return e
 }
 
-// rebind binds the session to the SMSC and waits until it is bound.
 func (e *env) rebind(t *testing.T) {
 	t.Helper()
 
@@ -350,9 +330,6 @@ func (e *env) job(t *testing.T, id int64) db.Job {
 	return j
 }
 
-// simAnswer is the deliver_sm by which the SMSC forwards a card's PoR, with its user data header, to the job's
-// message. Ella SMSC sends an SME Manual/User Acknowledgement with UDHI and the message_id as receipted_message_id;
-// pySim-smpp2sim a normal message without UDHI or TLVs.
 func (e *env) simAnswer(j db.Job, packet []byte) *smpp.DeliverSM {
 	d := &smpp.DeliverSM{Message: smpp.Message{
 		Source:      smpp.Address{TON: 1, NPI: 1, Addr: strings.TrimPrefix(e.msisdn, "+")},
@@ -368,7 +345,8 @@ func (e *env) simAnswer(j db.Job, packet []byte) *smpp.DeliverSM {
 	return d
 }
 
-// receipt is the SMSC's delivery receipt for the job's message (SMPP 3.4 section 2.11, appendix B).
+// SMPP 3.4 section 2.11
+// SMPP 3.4 appendix B
 func (e *env) receipt(j db.Job, state smpp.MessageState) *smpp.DeliverSM {
 	d := &smpp.DeliverSM{Message: smpp.Message{
 		Source:      smpp.Address{TON: 1, NPI: 1, Addr: strings.TrimPrefix(e.msisdn, "+")},
@@ -388,7 +366,6 @@ var stat = map[smpp.MessageState]string{
 	smpp.StateDeleted: "DELETED", smpp.StateRejected: "REJECTD", smpp.StateAccepted: "ACCEPTD",
 }
 
-// por is the PoR of the card to the job's current command, with status and the compact response data.
 func (e *env) por(t *testing.T, id int64, status ota.Status, data string) []byte {
 	t.Helper()
 
@@ -397,7 +374,6 @@ func (e *env) por(t *testing.T, id int64, status ota.Status, data string) []byte
 	return e.porOf(t, j.TAR, j.Counter, status, data)
 }
 
-// porOf is a PoR of the card for TAR tar and counter counter.
 func (e *env) porOf(t *testing.T, tar []byte, counter uint64, status ota.Status, data string) []byte {
 	t.Helper()
 
@@ -407,8 +383,6 @@ func (e *env) porOf(t *testing.T, tar []byte, counter uint64, status ota.Status,
 	return porPacket(t, e.keyset, r)
 }
 
-// answer makes the SMSC deliver the job's current command and forward the card's PoR, then, as Ella SMSC does, its
-// receipt DELIVRD.
 func (e *env) answer(t *testing.T, id int64, status ota.Status, data string) {
 	t.Helper()
 
@@ -424,7 +398,6 @@ func (e *env) step() {
 	e.runner.Step(context.Background())
 }
 
-// fcp is a compact response to SELECT for the FCP and GET RESPONSE: an EF of size octets.
 func fcp(size int) string {
 	return "02" + "9000" + "62" + "0b" + "82024121" + "83026f61" + "8001" + hex.EncodeToString([]byte{byte(size)})
 }
@@ -442,9 +415,6 @@ func TestRead(t *testing.T) {
 			t.Fatalf("after sending the FCP command, job = %+v", j)
 		}
 
-		// The submit_sm of SMPP 3.4 section 4.4.1: international E.164 addresses, UDHI, PID 7F, class 2 8-bit, a relative
-		// validity of a day, a receipt and the SME Manual/User Acknowledgement asked for, the command packet behind its
-		// user data header.
 		b := e.smsc.sent()[0]
 		if b.Source != (smpp.Address{TON: 1, NPI: 1, Addr: "15550001000"}) || b.Destination != (smpp.Address{TON: 1, NPI: 1, Addr: "15550000001"}) ||
 			b.ESMClass != 0x40 || b.ProtocolID != 0x7f || b.DataCoding != 0xf6 || b.RegisteredDelivery != 0x09 ||
@@ -453,7 +423,6 @@ func TestRead(t *testing.T) {
 			t.Fatalf("submitted %+v", b)
 		}
 
-		// A pending message leaves the job sent.
 		e.step()
 
 		if j := e.job(t, id); j.Status != db.JobSent || len(e.smsc.sent()) != 1 {
@@ -479,7 +448,6 @@ func TestRead(t *testing.T) {
 	})
 }
 
-// TestReadLargeFile reads 255 octets in chunks that each fit a PoR.
 func TestReadLargeFile(t *testing.T) {
 	forms(t, func(t *testing.T, generic bool) {
 		e := newEnv(t, "+15550000001", sja5(t))
@@ -504,9 +472,6 @@ func TestReadLargeFile(t *testing.T) {
 			t.Fatalf("job = %+v after %d messages", j, len(e.smsc.sent()))
 		}
 
-		// Every PoR fits the TP-UD of an SMS-DELIVER-REPORT (TS 23.040 clause 9.2.2.1a): the UDH, RPL, RHL and TAR,
-		// then CNTR, PCNTR, the status, a CC of 8 octets and the compact response of a chunk, ciphered to the block of
-		// triple DES or AES.
 		for _, block := range []int{8, 16} {
 			secured := 5 + 2 + 8 + 3 + jobs.ReadChunk
 			if n := 3 + 6 + secured + (block-secured%block)%block; n > 159 {
@@ -585,13 +550,10 @@ func TestSetAndClear(t *testing.T) {
 	}
 }
 
-// imsiWrite replaces the lab card's IMSI 001010000000001 with 001010000000002, whose EF.IMSI is imsi2.
 var imsiWrite = db.Job{Operation: db.OperationIMSIWrite, IMSI: "001010000000002", PreviousIMSI: "001010000000001"}
 
 const imsi2 = "080910100000000020"
 
-// TestIMSIWrite checks that an IMSI write succeeds only when EF.IMSI reads back what it wrote, and that only then
-// the card's IMSI on record becomes the new one: a failed write left the card's, and an unconfirmed one may have.
 func TestIMSIWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -627,7 +589,6 @@ func TestIMSIWrite(t *testing.T) {
 		})
 	}
 
-	// Without a PoR, the write may or may not have taken effect: the IMSI on record stays until a late PoR tells.
 	t.Run("late PoR", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, imsiWrite)
@@ -650,8 +611,6 @@ func TestIMSIWrite(t *testing.T) {
 		}
 	})
 
-	// A late PoR of a write that a later write followed does not set the IMSI on record: the card ran the later one
-	// after it.
 	t.Run("late PoR after a later write", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		first := e.queue(t, imsiWrite)
@@ -709,9 +668,7 @@ func TestPoRStatus(t *testing.T) {
 	}
 }
 
-// TestPoRNotThisCommand checks that a PoR is attached to a job only when it answers its command: from the card's
-// number, with the command's TAR and counter (TS 102 225 clause 5.2, table 3). Another one is acknowledged and left
-// aside, and the job keeps waiting for its own (review L1).
+// ETSI TS 102 225 clause 5.2 table 3
 func TestPoRNotThisCommand(t *testing.T) {
 	forms(t, func(t *testing.T, generic bool) {
 		for _, tc := range []struct {
@@ -741,7 +698,6 @@ func TestPoRNotThisCommand(t *testing.T) {
 					t.Fatalf("job = %+v", j)
 				}
 
-				// Its own PoR is still taken.
 				e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
 
 				if j := e.job(t, id); j.Status != db.JobSucceeded {
@@ -752,10 +708,8 @@ func TestPoRNotThisCommand(t *testing.T) {
 	})
 }
 
-// TestPoRForms checks that the card's answer is told by its content, a Response Packet behind the user data header
-// 02 71 00, from the card's number: as a normal message or an SME Manual/User Acknowledgement, with or without UDHI
-// (TS 31.115 clause 4.1), with or without receipted_message_id, in short_message or message_payload (SMPP 3.4
-// section 4.6.1).
+// TS 31.115 clause 4.1
+// SMPP 3.4 section 4.6.1
 func TestPoRForms(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -800,7 +754,6 @@ func TestPoRForms(t *testing.T) {
 
 		e.step()
 
-		// A text from the card, an SMSC delivery acknowledgement carrying a PoR, and a PoR behind another header.
 		por := e.por(t, id, ota.StatusPoROK, "039000ffffff0000")
 		for _, d := range []*smpp.DeliverSM{
 			{Message: smpp.Message{Source: smpp.Address{Addr: "15550000001"}, ShortMessage: []byte("hi")}},
@@ -824,7 +777,7 @@ func TestNoPoR(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		job    db.Job
-		answer []byte // nil: no SIM answer
+		answer []byte
 		state  smpp.MessageState
 		want   db.JobStatus
 		err    string
@@ -834,7 +787,6 @@ func TestNoPoR(t *testing.T) {
 		{"write undeliverable", clear2, nil, smpp.StateUndeliverable, db.JobUnconfirmed, "Message undeliverable"},
 		{"read delivered", read, nil, smpp.StateDelivered, db.JobFailed, "without a PoR"},
 		{"read rejected", read, nil, smpp.StateRejected, db.JobFailed, "rejected"},
-		// L2: ACCEPTD is final (SMPP 3.4 appendix B, table B-2).
 		{"read accepted", read, nil, smpp.StateAccepted, db.JobFailed, "accepted"},
 		{"unsecured refusal", clear2, unsecured, smpp.StateDelivered, db.JobFailed, "unsecured"},
 	} {
@@ -861,8 +813,6 @@ func TestNoPoR(t *testing.T) {
 	}
 }
 
-// TestUnsecuredPoRAmbiguous checks that an unsecured PoR, of counter zero, is left aside when two cards of the
-// number have a job of the TAR in flight: it cannot tell which it answers.
 func TestUnsecuredPoRAmbiguous(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	other := db.Card{
@@ -890,8 +840,7 @@ func TestUnsecuredPoRAmbiguous(t *testing.T) {
 	}
 }
 
-// TestReceiptCorrelation checks how a receipt finds its job: by receipted_message_id; without it, by the id of its
-// text (SMPP 3.4 appendix B), whose stat then gives the state; and that one for another message is left aside.
+// SMPP 3.4 appendix B
 func TestReceiptCorrelation(t *testing.T) {
 	t.Run("receipt without TLVs", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
@@ -941,8 +890,6 @@ func TestReceiptCorrelation(t *testing.T) {
 	})
 }
 
-// TestReceiptBeforePoR checks an SMSC that sends the receipt before the card's answer: the receipt closes the job
-// without a PoR, and the PoR, matched by TAR and counter, then gives its outcome.
 func TestReceiptBeforePoR(t *testing.T) {
 	t.Run("write", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
@@ -964,7 +911,6 @@ func TestReceiptBeforePoR(t *testing.T) {
 		}
 	})
 
-	// A read closed without the PoR to a step stays failed when the PoR is not its last; the operator runs it again.
 	t.Run("read step", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -981,7 +927,6 @@ func TestReceiptBeforePoR(t *testing.T) {
 		}
 	})
 
-	// The PoR of a read's last command still gives its outcome.
 	t.Run("read refused", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -998,8 +943,6 @@ func TestReceiptBeforePoR(t *testing.T) {
 	})
 }
 
-// TestNoAnswer checks that a job sent long past its validity, without a PoR or a receipt, ends; and that its late PoR
-// still gives its outcome (review M1).
 func TestNoAnswer(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
@@ -1028,8 +971,6 @@ func TestNoAnswer(t *testing.T) {
 	}
 }
 
-// TestNoTimeoutWhileUnbound checks that sent jobs do not time out while unbound, nor until the SMSC has had time to
-// send what it held once bound again (review M1).
 func TestNoTimeoutWhileUnbound(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
@@ -1066,8 +1007,6 @@ func TestNoTimeoutWhileUnbound(t *testing.T) {
 	}
 }
 
-// TestStoreFailures checks that a deliver_sm whose outcome cannot be stored is answered ESME_RX_T_APPN, so that the
-// SMSC sends it again, and that the copy then sent is recorded (review H1, M2).
 func TestStoreFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1104,7 +1043,6 @@ func TestStoreFailures(t *testing.T) {
 					t.Fatalf("after the retry, job = %+v", j)
 				}
 
-				// A copy for the closed job is acknowledged.
 				e.smsc.deliver(t, d)
 			})
 		})
@@ -1133,8 +1071,6 @@ func TestStoreFailures(t *testing.T) {
 	})
 }
 
-// TestMarkSentFails checks that a message that cannot be recorded is sent again with a higher counter, and that the
-// first one's PoR, of the spent counter, is not taken for the job's (review L6).
 func TestMarkSentFails(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id := e.queue(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
@@ -1167,9 +1103,7 @@ func TestMarkSentFails(t *testing.T) {
 	}
 }
 
-// TestAES runs a job on an AES key set with 4-octet checksums, which needs the counter (TS 102 225 clause 5.1.2): the
-// command's KIc and KID tell AES and the key set, and its CHL the checksum length; the PoR, of counter 1, is the one
-// package ota's tests code for the key set of pySim's AES tests.
+// ETSI TS 102 225 clause 5.1.2
 func TestAES(t *testing.T) {
 	por := mustHex(t, "02710000240eb000019fa071ecd80a05e3550a7054feb488f5663864ee046ddd165b39ca3b3f118856")
 
@@ -1229,7 +1163,6 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("job = %+v, want it queued for a retry", j)
 		}
 
-		// The runner backs off: nothing is sent before the backoff ends (review L5).
 		e.smsc.setStatus(smpp.StatusOK)
 		e.step()
 
@@ -1237,7 +1170,6 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("during the backoff, job = %+v", j)
 		}
 
-		// The retry takes a new counter: the spent one may have reached the card.
 		e.now = e.now.Add(time.Minute)
 		e.step()
 
@@ -1246,7 +1178,6 @@ func TestSendFailures(t *testing.T) {
 		}
 	})
 
-	// A throttling stops the batch, and a command that the SMSC never takes fails after the last attempt (review L5).
 	t.Run("SMSC keeps throttling", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		other := db.Card{ICCID: "8949440000001659216", IMSI: "001010000000002", MSISDN: "+15550000002", TAR: tar, KVN: 1, KeySets: []db.KeySet{sja5(t)}}
@@ -1276,7 +1207,6 @@ func TestSendFailures(t *testing.T) {
 			t.Fatalf("the batch went on to the next job, counter %d", n)
 		}
 
-		// The attempts are counted on the job: a restarted runner fails it at the tenth.
 		restarted := jobs.NewRunner(e.faults, e.runner.Connect, time.Hour, slog.New(slog.DiscardHandler))
 		restarted.Now = e.runner.Now
 		restarted.Step(context.Background())
@@ -1290,7 +1220,6 @@ func TestSendFailures(t *testing.T) {
 		}
 	})
 
-	// The SMSC answers ESME_RINVBNDSTS while it unbinds: the job waits for the next bind (review L4).
 	t.Run("SMSC unbinding", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		e.smsc.setStatus(smpp.StatusInvBndSts)
@@ -1309,8 +1238,6 @@ func TestSendFailures(t *testing.T) {
 		}
 	})
 
-	// A store that fails, as when the database is locked, holds the job queued rather than failing it: the same command
-	// is sent once the store answers.
 	t.Run("store fails", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -1339,7 +1266,6 @@ func TestSendFailures(t *testing.T) {
 		id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})
 		e.step()
 
-		// The job waits, and spends no counter.
 		if j := e.job(t, id); j.Status != db.JobQueued || len(e.smsc.sent()) != 0 {
 			t.Fatalf("job = %+v", j)
 		}
@@ -1350,8 +1276,6 @@ func TestSendFailures(t *testing.T) {
 	})
 }
 
-// TestStop checks that a runner told to stop while the SMSC takes a job's message still records it, so that the job
-// is not sent again, and leaves the next jobs queued, without logging failures.
 func TestStop(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	logs := &recorder{}
@@ -1372,7 +1296,6 @@ func TestStop(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
-	// The stop comes once the SMSC has the submit_sm, well before its submit_sm_resp.
 	e.smsc.mu.Lock()
 	e.smsc.onSubmit = func() {
 		stop()
@@ -1394,12 +1317,10 @@ func TestStop(t *testing.T) {
 		t.Fatalf("logged on stop: %v", l)
 	}
 
-	// The processing of the job ends, as sent, though the runner was told to stop.
 	if p := e.named(processName); len(p) != 1 || spanAttrs(p[0])["ella.ota.job.outcome"] != "sent" {
 		t.Fatalf("process spans on stop: %d", len(p))
 	}
 
-	// A stopped runner starts nothing.
 	e.runner.Step(ctx)
 
 	if len(e.smsc.sent()) != 1 {
@@ -1407,7 +1328,6 @@ func TestStop(t *testing.T) {
 	}
 }
 
-// recorder is a slog.Handler that keeps the records.
 type recorder struct {
 	mu      sync.Mutex
 	records []slog.Record
@@ -1427,7 +1347,6 @@ func (r *recorder) WithAttrs([]slog.Attr) slog.Handler { return r }
 
 func (r *recorder) WithGroup(string) slog.Handler { return r }
 
-// above are the messages of the records of level at least l.
 func (r *recorder) above(l slog.Level) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1474,7 +1393,6 @@ func TestValidityPeriod(t *testing.T) {
 		{90 * time.Minute, "000000013000000R"},
 		{time.Second, "000000000001000R"},
 		{25*time.Hour + 61*time.Second, "000001010101000R"},
-		// L3: the fields stay normalised up to 99 days.
 		{jobs.MaxValidity - time.Second, "000098235959000R"},
 		{jobs.MaxValidity, "000099000000000R"},
 	} {
@@ -1484,7 +1402,6 @@ func TestValidityPeriod(t *testing.T) {
 			continue
 		}
 
-		// The SMSC reads it back to the same expiry.
 		vp, err := smpp.ParseTime(got, now)
 		if err != nil || !vp.At(now).Equal(now.Add(tc.validity)) {
 			t.Errorf("%q reads as %v, %v", got, vp.At(now), err)
@@ -1511,7 +1428,6 @@ func TestScript(t *testing.T) {
 			"00a4000c026f6100d600050599f999480000b0000505",
 		},
 		{db.Job{Operation: db.OperationOPLMNClear, Slot: 2}, "00a4000c026f6100d6000505ffffff000000b0000505"},
-		// The script that the lab sysmoISIM-SJA5 ran over the air: the whole of EF.IMSI, written and read back.
 		{imsiWrite, "00a4000c026f07" + "00d6000009" + imsi2 + "00b0000009"},
 	} {
 		s, err := jobs.Script(tc.job)
@@ -1555,7 +1471,6 @@ func TestOneJobPerCard(t *testing.T) {
 	}
 }
 
-// TestRunWakes checks that Run sends a job as soon as it is woken, long before its interval.
 func TestRunWakes(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 
@@ -1585,7 +1500,6 @@ func TestRunWakes(t *testing.T) {
 	}
 }
 
-// TestNoGateway checks that jobs wait, queued, while no SMSC is set.
 func TestNoGateway(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id := e.queue(t, db.Job{Operation: db.OperationOPLMNRead})

@@ -30,13 +30,10 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 const dash = (value: string) => value || "—";
 
-// WRAP is the class of the cells whose text wraps rather than being cut: the rows grow to fit it.
 const WRAP = "wrap";
 
-// newJobBlock is why a job cannot be created for a card, if it cannot.
 const newJobBlock = (card: Card, smscUnset: boolean): string | undefined => {
   if (smscUnset) return "Set the SMSC first";
-  // A job reaches a card by SMS, to its MSISDN.
   if (!card.msisdn) return "No MSISDN";
   return undefined;
 };
@@ -72,7 +69,6 @@ const columns = (
   },
   { field: "tar", headerName: "TAR", width: 80 },
   {
-    // The key set that OTA commands use; the Edit dialog lists them all, with their counters.
     field: "kvn",
     headerName: "Key set",
     width: 110,

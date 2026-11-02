@@ -114,7 +114,6 @@ func TestCheck(t *testing.T) {
 }
 
 func TestFileSize(t *testing.T) {
-	// An FCP template with a file descriptor, a file identifier, and a file size of 60 octets.
 	size, err := FileSize(mustHex(t, "620b"+"82024121"+"83026f61"+"8001"+"3c"))
 	if err != nil || size != 60 {
 		t.Fatalf("size = %d, %v", size, err)
@@ -164,7 +163,8 @@ func TestSelector(t *testing.T) {
 	}
 }
 
-// TestAccess checks the access technology bits and the qualifiers of TS 31.102 tables 4.2.5.1 and 4.2.5.2.
+// TS 31.102 clause 4.2.5 table 4.2.5.1
+// TS 31.102 clause 4.2.5 table 4.2.5.2
 func TestAccess(t *testing.T) {
 	cases := []struct {
 		access AccessTechnology
@@ -210,7 +210,6 @@ func TestAccess(t *testing.T) {
 			t.Fatalf("ParseAccess(%v) = %#04x, %v, want %#04x", tc.names, uint16(got), err, uint16(tc.access))
 		}
 
-		// Decoding gives the names back.
 		if back := got.Names(); !slices.Equal(back, sortedLike(tc.names)) {
 			t.Fatalf("%#04x decodes as %v", uint16(got), back)
 		}

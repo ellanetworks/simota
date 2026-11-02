@@ -34,7 +34,6 @@ const set: SMSCSettings = {
   },
 };
 
-// serve is the SMSC API: a PUT answers what it set, without its password, as the server does.
 const serve = (
   smsc: SMSCSettings,
   put: (body: Record<string, unknown>) => Response = (body) =>
@@ -85,7 +84,6 @@ const settings = () =>
   );
 
 const openEdit = async () => {
-  // The Edit button waits for the settings.
   const button = await screen.findByRole("button", { name: "Edit" });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
@@ -137,7 +135,6 @@ describe("SMSC", () => {
       Bind: `Boundsince ${formatDateTime(SINCE)}`,
       "Last error": "None",
     });
-    // No banner: the bind state is in the table.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     const dialog = await openEdit();
