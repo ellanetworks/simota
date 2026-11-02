@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"path"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ellanetworks/simota/internal/db"
 	"github.com/ellanetworks/simota/internal/gateway"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -40,6 +42,8 @@ type Config struct {
 	Ready          func(ctx context.Context) error
 	Gateway        Gateway
 	TracerProvider trace.TracerProvider
+	Metrics        prometheus.Gatherer
+	Requests       *RequestMetrics
 	Logger         *slog.Logger
 }
 
@@ -58,26 +62,41 @@ const (
 
 func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
+	handle := func(pattern string, h http.Handler) {
+		mux.Handle(pattern, cfg.Requests.instrument(pattern, h))
+	}
 
-	mux.Handle("GET /api/v1/livez", Livez())
-	mux.Handle("GET /api/v1/readyz", Readyz(cfg))
-	mux.Handle("GET /api/v1/status", GetStatus(cfg))
-	mux.Handle("GET /api/v1/openapi.yaml", OpenAPISpec())
-	mux.Handle("GET /api/v1/cards", ListCards(cfg))
-	mux.Handle("POST /api/v1/cards", CreateCard(cfg))
-	mux.Handle("POST /api/v1/cards/import", ImportCards(cfg))
-	mux.Handle("GET /api/v1/cards/{iccid}", GetCard(cfg))
-	mux.Handle("PUT /api/v1/cards/{iccid}", UpdateCard(cfg))
-	mux.Handle("DELETE /api/v1/cards/{iccid}", DeleteCard(cfg))
-	mux.Handle("PUT /api/v1/cards/{iccid}/key-sets/{version}", UpdateKeySet(cfg))
-	mux.Handle("POST /api/v1/jobs", CreateJobs(cfg))
-	mux.Handle("GET /api/v1/jobs", ListJobs(cfg))
-	mux.Handle("GET /api/v1/jobs/{id}", GetJob(cfg))
-	mux.Handle("GET /api/v1/smsc", GetSMSC(cfg))
-	mux.Handle("PUT /api/v1/smsc", UpdateSMSC(cfg))
+	handle("GET /api/v1/livez", Livez())
+	handle("GET /api/v1/readyz", Readyz(cfg))
+	handle("GET /api/v1/status", GetStatus(cfg))
+	handle("GET /api/v1/metrics", GetMetrics(cfg))
+	handle("GET /api/v1/openapi.yaml", OpenAPISpec())
+	handle("GET /api/v1/cards", ListCards(cfg))
+	handle("POST /api/v1/cards", CreateCard(cfg))
+	handle("POST /api/v1/cards/import", ImportCards(cfg))
+	handle("GET /api/v1/cards/{iccid}", GetCard(cfg))
+	handle("PUT /api/v1/cards/{iccid}", UpdateCard(cfg))
+	handle("DELETE /api/v1/cards/{iccid}", DeleteCard(cfg))
+	handle("PUT /api/v1/cards/{iccid}/key-sets/{version}", UpdateKeySet(cfg))
+	handle("POST /api/v1/jobs", CreateJobs(cfg))
+	handle("GET /api/v1/jobs", ListJobs(cfg))
+	handle("GET /api/v1/jobs/{id}", GetJob(cfg))
+	handle("GET /api/v1/smsc", GetSMSC(cfg))
+	handle("PUT /api/v1/smsc", UpdateSMSC(cfg))
+	handle("GET /api/v1/pprof/{$}", http.HandlerFunc(pprof.Index))
+	handle("GET /api/v1/pprof/allocs", pprof.Handler("allocs"))
+	handle("GET /api/v1/pprof/goroutine", pprof.Handler("goroutine"))
+	handle("GET /api/v1/pprof/goroutineleak", pprof.Handler("goroutineleak"))
+	handle("GET /api/v1/pprof/heap", pprof.Handler("heap"))
+	handle("GET /api/v1/pprof/threadcreate", pprof.Handler("threadcreate"))
+	handle("GET /api/v1/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	handle("GET /api/v1/pprof/profile", http.HandlerFunc(pprof.Profile))
+	handle("GET /api/v1/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	handle("POST /api/v1/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	handle("GET /api/v1/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	if cfg.Frontend != nil {
-		mux.Handle("GET /", Frontend(cfg.Frontend))
+		handle("GET /", Frontend(cfg.Frontend))
 	}
 
 	return traced(cfg.TracerProvider, mux)

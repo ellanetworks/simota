@@ -272,6 +272,24 @@ func TestTraceEndToEnd(t *testing.T) {
 		}
 	}
 
+	metrics := c.must(http.MethodGet, "/api/v1/metrics", "", "", http.StatusOK)
+	for _, series := range []string{
+		`ellasimota_build_info{`,
+		"\nellasimota_smsc_bound 1\n",
+		"\n" + `ellasimota_jobs_pending{status="queued"} 0` + "\n",
+		"\n" + `ellasimota_jobs_pending{status="sent"} 0` + "\n",
+		"\n" + `ellasimota_smsc_submit_duration_seconds_count{result="accepted"} 1` + "\n",
+		"\n" + `ellasimota_job_duration_seconds_count{operation="oplmn_read"} 0` + "\n",
+		"\n" + `ellasimota_api_request_duration_seconds_count{code="201",method="post",route="/api/v1/jobs"} 1` + "\n",
+		"\n" + `ellasimota_jobs_completed_total{operation="oplmn_read",status="failed"} 1` + "\n",
+		"\ngo_goroutines ",
+		"\nprocess_resident_memory_bytes ",
+	} {
+		if !strings.Contains(metrics, series) {
+			t.Errorf("metrics do not have %q", series)
+		}
+	}
+
 	stop()
 	<-stopped
 

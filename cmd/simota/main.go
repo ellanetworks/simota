@@ -22,6 +22,9 @@ import (
 	"github.com/ellanetworks/simota/internal/tracing"
 	"github.com/ellanetworks/simota/ui"
 	"github.com/ellanetworks/smsc/smpp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -31,6 +34,8 @@ const (
 	jobInterval     = 2 * time.Second
 	shutdownTimeout = 5 * time.Second
 )
+
+var revision string
 
 func main() {
 	configPath := flag.String("config", "simota.yaml", "path to the configuration file")
@@ -116,14 +121,20 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 
+	requests := api.NewRequestMetrics()
+
 	addr := netip.AddrPortFrom(cfg.API.Address, uint16(cfg.API.Port)).String()
 	srv := &http.Server{
 		Addr: addr,
 		Handler: api.NewHandler(api.Config{
 			Store: store, Frontend: ui.FS(), Version: version, Notify: runner.Wake, Gateway: gw, Ready: store.Ping,
-			TracerProvider: tracerProvider, Logger: logger,
+			TracerProvider: tracerProvider, Metrics: newRegistry(store, gw, requests), Requests: requests, Logger: logger,
 		}),
-		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       time.Minute,
+		WriteTimeout:      time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	runnerDone := make(chan struct{})
@@ -161,6 +172,25 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	}
 
 	return err
+}
+
+func newRegistry(store *db.DB, gw *gateway.Gateway, requests *api.RequestMetrics) *prometheus.Registry {
+	build := prometheus.Labels{"version": version}
+	if revision != "" {
+		build["revision"] = revision
+	}
+
+	r := prometheus.NewRegistry()
+	r.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		versioncollector.NewCollector("ellasimota", versioncollector.WithExtraConstLabels(build)),
+	)
+	r.MustRegister(store.Collectors()...)
+	r.MustRegister(gw.Collectors()...)
+	r.MustRegister(requests.Collectors()...)
+
+	return r
 }
 
 func newTracerProvider(ctx context.Context, cfg config.Telemetry, logger *slog.Logger) (trace.TracerProvider,
