@@ -35,8 +35,6 @@ import { TABLE_CONTAINER_SX } from "@/utils/layout";
 
 export const DETAIL_REFRESH_MS = 5000;
 
-// The panel is smsc's message panel: under the app bar, resizable between PANEL_MIN_WIDTH and PANEL_MAX_VW of the
-// window.
 const PANEL_DEFAULT_WIDTH = 560;
 const PANEL_MIN_WIDTH = 350;
 const PANEL_MAX_VW = 0.8;
@@ -48,8 +46,6 @@ const octets = (o: string): ReactNode => (
   </Box>
 );
 
-// Entries are the entries a job read: the roaming list for a read, the slot read back for a set or a clear. An unused
-// entry has no PLMN.
 function Entries({ job }: { job: Job }) {
   const { entries } = job;
   const title =
@@ -96,7 +92,6 @@ function Entries({ job }: { job: Job }) {
   );
 }
 
-// IMSIReadBack is the IMSI that an IMSI write read back: what the card holds, even when it is not the IMSI written.
 function IMSIReadBack({ job }: { job: Job }) {
   return (
     <Box component="section" aria-labelledby="read-back-title">
@@ -118,7 +113,6 @@ function IMSIReadBack({ job }: { job: Job }) {
   );
 }
 
-// Packets shows the command sent to the card and its answer only when asked to, as smsc shows a message's content.
 function Packets({ job }: { job: Job }) {
   const [shown, setShown] = useState(false);
 
@@ -182,7 +176,6 @@ function JobDetail({
     ["Key set", dash(job.kvn)],
     ["Created", formatTimestamp(job.created_at)],
     ["Updated", formatTimestamp(job.updated_at)],
-    // The step counts the job's commands from 1.
     ["Step", job.step === undefined ? "—" : job.step + 1],
     ["Counter", dash(job.counter)],
   );
@@ -265,14 +258,11 @@ interface JobDrawerProps {
   onClose: () => void;
 }
 
-// JobDrawer shows a job beside the list, as smsc's MessageDrawer shows a message: the list stays usable, and Escape
-// closes it.
 export default function JobDrawer({ job, onClose }: JobDrawerProps) {
   const open = job !== null;
   const panelRef = useRef<HTMLElement>(null);
   const [width, setWidth] = useState(PANEL_DEFAULT_WIDTH);
 
-  // Opening the panel moves focus into it, and closing it gives focus back, to the row that opened it.
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement;

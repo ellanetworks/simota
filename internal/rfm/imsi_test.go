@@ -9,7 +9,6 @@ func TestIMSI(t *testing.T) {
 	for _, tc := range []struct {
 		imsi, ef string
 	}{
-		// The lab sysmoISIM-SJA5's, read over the air: 15 digits, odd.
 		{"001010000000001", "080910100000000010"},
 		{"00101000000001", "08011010000000" + "00f1"},
 		{"999990123456789", "089999991032547698"},

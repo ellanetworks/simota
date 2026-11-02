@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// Operation is what a job does on a card's USIM: on its EF.OPLMNwAcT, or its EF.IMSI.
 type Operation string
 
 const (
@@ -18,70 +17,47 @@ const (
 	OperationIMSIWrite  Operation = "imsi_write"
 )
 
-// JobStatus is where a job is: queued for its next command, sent to the SMSC and awaiting the card's answer, or done.
 type JobStatus string
 
 const (
-	JobQueued    JobStatus = "queued"
-	JobSent      JobStatus = "sent"
-	JobSucceeded JobStatus = "succeeded"
-	// JobUnconfirmed is a job whose command may have taken effect, without a PoR that tells.
+	JobQueued      JobStatus = "queued"
+	JobSent        JobStatus = "sent"
+	JobSucceeded   JobStatus = "succeeded"
 	JobUnconfirmed JobStatus = "unconfirmed"
 	JobFailed      JobStatus = "failed"
 )
 
-// Job is an OTA operation on a card, run as one or more commands, and its outcome.
 type Job struct {
-	ID        int64
-	ICCID     string
-	Operation Operation
-	// Slot is the entry, from 1, that a set or clear writes. MCC, MNC and Access are the entry a set writes.
-	Slot     int
-	MCC, MNC string
-	Access   int
-	// IMSI is the IMSI an IMSI write writes, and PreviousIMSI the card's IMSI on record that it replaces.
-	IMSI, PreviousIMSI string
-	// TAR and KVN are the card's when the job was created: its commands and PoRs use them.
-	TAR    []byte
-	KVN    int
-	Status JobStatus
-	// Step is the index of the job's current command, and FileSize the size of the file, -1 until read.
-	Step     int
-	FileSize int
-	// Counter and MessageID are the CNTR and the SMSC's message_id of the current command, once sent.
-	Counter   uint64
-	MessageID string
-	// Command is the TP-UDH and TP-UD of the current Command Packet, and Response those of its Response Packet.
-	Command, Response []byte
-	// PoRStatus and StatusWord are the Response Status Code and the status word of the last command answered, or -1.
-	PoRStatus  int
-	StatusWord int
-	// Warning is a last status word that completed with a warning.
-	Warning bool
-	// Data is the file contents the job read.
-	Data []byte
-	// Error tells why a job failed or is unconfirmed.
-	Error string
-	// PoRMissing is a job closed without the PoR to its last command, by a delivery receipt or the deadline: a PoR
-	// that comes later, with the command's TAR and counter, still gives its outcome.
-	PoRMissing bool
-	// TraceParent is the W3C traceparent of the span that created the job, and CommandTraceParent that of the span that
-	// sent its current command, or "" when untraced.
+	ID                              int64
+	ICCID                           string
+	Operation                       Operation
+	Slot                            int
+	MCC, MNC                        string
+	Access                          int
+	IMSI, PreviousIMSI              string
+	TAR                             []byte
+	KVN                             int
+	Status                          JobStatus
+	Step                            int
+	FileSize                        int
+	Counter                         uint64
+	MessageID                       string
+	Command, Response               []byte
+	PoRStatus                       int
+	StatusWord                      int
+	Warning                         bool
+	Data                            []byte
+	Error                           string
+	PoRMissing                      bool
 	TraceParent, CommandTraceParent string
 	CreatedAt                       time.Time
 	UpdatedAt                       time.Time
 }
 
-// ErrBusy is a job for a card that has one queued or sent already.
 var ErrBusy = errors.New("card has a job in progress")
 
-// ErrIMSIMismatch is an IMSI write whose previous IMSI is not the card's IMSI on record.
 var ErrIMSIMismatch = errors.New("previous IMSI is not the card's IMSI on record")
 
-// CreateJobs queues jobs, all or none, with the TAR and key set version of their card, and the trace context of ctx,
-// which the spans that run them link to. A card may have one job in
-// progress at a time. An IMSI write is queued only while its previous IMSI is the card's IMSI on record, which changes
-// only by the operator or by an IMSI write that succeeds: the write replaces the IMSI that the operator means to.
 func (d *DB) CreateJobs(ctx context.Context, jobs []Job) (_ []int64, err error) {
 	traceparent := traceParent(ctx)
 
@@ -166,8 +142,6 @@ func (d *DB) GetJob(ctx context.Context, id int64) (_ Job, err error) {
 	return jobs[0], nil
 }
 
-// ListJobs lists a page, from 1, of the jobs, newest first, of the cards that search finds or of all when it is empty,
-// and their number.
 func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) (_ []Job, _ int, err error) {
 	ctx, span := d.start(ctx, opListJobs)
 
@@ -175,7 +149,6 @@ func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) (_ 
 
 	where, args := "", []any{}
 	if search != "" {
-		// search is part of the card's ICCID, IMSI or MSISDN.
 		where = `WHERE instr(iccid, ?) > 0 OR iccid IN (SELECT iccid FROM cards WHERE instr(coalesce(imsi, ''), ?) > 0
 			OR instr(msisdn, ?) > 0)`
 		args = []any{search, search, search}
@@ -191,7 +164,6 @@ func (d *DB) ListJobs(ctx context.Context, search string, page, perPage int) (_ 
 	return jobs, total, err
 }
 
-// JobsIn lists the jobs in a status, oldest first.
 func (d *DB) JobsIn(ctx context.Context, status JobStatus, limit int) (_ []Job, err error) {
 	ctx, span := d.start(ctx, opJobsIn)
 
@@ -200,7 +172,6 @@ func (d *DB) JobsIn(ctx context.Context, status JobStatus, limit int) (_ []Job, 
 	return d.jobs(ctx, "WHERE status = ? ORDER BY id LIMIT ?", status, limit)
 }
 
-// SentJob is the job whose current command went to the SMSC as message messageID, or ErrNotFound.
 func (d *DB) SentJob(ctx context.Context, messageID string) (_ Job, err error) {
 	ctx, span := d.start(ctx, opSentJob)
 
@@ -209,11 +180,8 @@ func (d *DB) SentJob(ctx context.Context, messageID string) (_ Job, err error) {
 	return d.oneJob(ctx, "WHERE status = 'sent' AND message_id = ?", messageID)
 }
 
-// maxAwaiting is the most jobs that AwaitingPoR returns.
 const maxAwaiting = 10
 
-// AwaitingPoR lists, newest first, the jobs of the cards of MSISDN msisdn whose last command, of TAR tar, a PoR may
-// answer: those sent, and those closed without its PoR. The PoR's counter tells which, if any, it answers.
 func (d *DB) AwaitingPoR(ctx context.Context, msisdn string, tar []byte) (_ []Job, err error) {
 	ctx, span := d.start(ctx, opAwaitingPoR)
 
@@ -236,8 +204,6 @@ func (d *DB) oneJob(ctx context.Context, clause string, args ...any) (Job, error
 	return jobs[0], nil
 }
 
-// MarkJobSent records that a queued job's current command, with its counter, went to the SMSC as message messageID,
-// and the trace context of ctx, that of the command's sending, which the span of its answer links to.
 func (d *DB) MarkJobSent(ctx context.Context, id int64, counter uint64, messageID string, command []byte) (err error) {
 	traceparent := traceParent(ctx)
 
@@ -255,7 +221,6 @@ func (d *DB) MarkJobSent(ctx context.Context, id int64, counter uint64, messageI
 	return affected(res)
 }
 
-// AdvanceJob records the answer to a sent job's command, and queues its next command.
 func (d *DB) AdvanceJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opAdvanceJob)
 
@@ -272,7 +237,6 @@ func (d *DB) AdvanceJob(ctx context.Context, j Job) (err error) {
 	return affected(res)
 }
 
-// CountAttempt counts a failed submit of a queued job's current command, and returns how many there were.
 func (d *DB) CountAttempt(ctx context.Context, id int64) (_ int, err error) {
 	ctx, span := d.start(ctx, opCountAttempt)
 
@@ -291,9 +255,6 @@ func (d *DB) CountAttempt(ctx context.Context, id int64) (_ int, err error) {
 	return n, nil
 }
 
-// FinishJob records the outcome of a job in progress: its final status, the answer it got, if any, the reason for a
-// failed or unconfirmed one, and whether it lacks the PoR to its last command. An IMSI write that succeeds makes its
-// IMSI the card's IMSI on record; one that fails or is unconfirmed leaves it, since the card may still hold it.
 func (d *DB) FinishJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opFinishJob)
 
@@ -302,10 +263,6 @@ func (d *DB) FinishJob(ctx context.Context, j Job) (err error) {
 	return d.finish(ctx, j, "status IN ('queued', 'sent')")
 }
 
-// ReviseJob replaces the outcome of a job closed without the PoR to its last command, of counter j.Counter, with the
-// one that this PoR gives. An IMSI write that the PoR shows succeeded makes its IMSI the card's IMSI on record, unless
-// a later IMSI write of the card was created since: the card ran this one before it, and the later one's outcome
-// tells the card's IMSI.
 func (d *DB) ReviseJob(ctx context.Context, j Job) (err error) {
 	ctx, span := d.start(ctx, opFinishJob)
 
@@ -340,7 +297,6 @@ func (d *DB) finish(ctx context.Context, j Job, where string, args ...any) error
 			return nil
 		}
 
-		// The job's own row tells its operation and IMSI, whatever j holds.
 		if _, err := tx.ExecContext(ctx, `UPDATE cards SET imsi = w.imsi, updated_at = ? FROM jobs AS w
 			WHERE w.id = ? AND w.operation = 'imsi_write' AND cards.iccid = w.iccid
 			AND NOT EXISTS (SELECT 1 FROM jobs WHERE iccid = w.iccid AND operation = 'imsi_write' AND id > w.id)`,
@@ -394,7 +350,6 @@ func (d *DB) jobs(ctx context.Context, clause string, args ...any) ([]Job, error
 	return jobs, rows.Err()
 }
 
-// unknown is n, or -1 for NULL.
 func unknown(n sql.NullInt64) int {
 	if !n.Valid {
 		return -1
@@ -403,7 +358,6 @@ func unknown(n sql.NullInt64) int {
 	return int(n.Int64)
 }
 
-// nullInt is n, or NULL for zero.
 func nullInt(n int) any {
 	if n == 0 {
 		return nil
@@ -412,7 +366,6 @@ func nullInt(n int) any {
 	return n
 }
 
-// nullUnknown is n, or NULL for -1, unknown.
 func nullUnknown(n int) any {
 	if n < 0 {
 		return nil
@@ -429,7 +382,6 @@ func nullString(s string) any {
 	return s
 }
 
-// nullAccess is the access technology of a set, which may be zero, or NULL for the other operations.
 func nullAccess(j Job) any {
 	if j.Operation != OperationOPLMNSet {
 		return nil

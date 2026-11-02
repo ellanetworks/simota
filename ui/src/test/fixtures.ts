@@ -24,7 +24,6 @@ export const job = (overrides: Partial<Job> = {}): Job => ({
   ...overrides,
 });
 
-// page is the page of items that url asks for, as the server paginates them.
 export const page = <T>(url: URL, items: T[]) => {
   const number = Number(url.searchParams.get("page") ?? 1);
   const perPage = Number(url.searchParams.get("per_page") ?? 25);

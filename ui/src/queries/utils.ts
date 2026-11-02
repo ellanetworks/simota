@@ -3,7 +3,6 @@ export type ApiErrorKind = "network" | "http";
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status?: number;
-  // detail is the technical line under the message, such as "HTTP 500 Internal Server Error".
   readonly detail?: string;
 
   constructor(
@@ -34,9 +33,7 @@ export interface PageParams {
 
 interface ApiFetchOptions {
   method?: string;
-  // body is sent as JSON.
   body?: unknown;
-  // text is sent as is, as text/plain, such as an uploaded file.
   text?: string;
 }
 

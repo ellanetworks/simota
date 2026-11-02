@@ -13,8 +13,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// TestEndSMPP checks the outcome that the span of an SMPP operation ends with: its response's command_status, and the
-// error.type of a failure, as Ella SMSC gives them.
 func TestEndSMPP(t *testing.T) {
 	ok, appn := smpp.StatusOK, smpp.StatusXTAppn
 

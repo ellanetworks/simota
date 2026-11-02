@@ -6,17 +6,16 @@ import (
 	"slices"
 )
 
-// FileOPLMNwAcT is the identifier of EF.OPLMNwAcT under ADF.USIM (TS 31.102 clause 4.2.53).
+// TS 31.102 clause 4.2.53
 const FileOPLMNwAcT uint16 = 0x6f61
 
-// selectorEntryLength is the length of an entry of a PLMN selector with access technology: PLMN 3, access technology 2.
 const selectorEntryLength = 5
 
-// AccessTechnology is the Access Technology Identifier of a PLMN selector entry (TS 31.102 clause 4.2.5).
+// TS 31.102 clause 4.2.5
 type AccessTechnology uint16
 
-// The bits of the Access Technology Identifier (TS 31.102 clause 4.2.5). E-UTRAN and GSM are qualified by tables
-// 4.2.5.1 and 4.2.5.2.
+// TS 31.102 clause 4.2.5 table 4.2.5.1
+// TS 31.102 clause 4.2.5 table 4.2.5.2
 const (
 	bitUTRAN             AccessTechnology = 0x8000
 	bitEUTRAN            AccessTechnology = 0x4000
@@ -34,7 +33,6 @@ const (
 	bitGSMQualifier      AccessTechnology = 0x0004
 )
 
-// The access technologies an entry selects, by name.
 const (
 	UTRAN               = "utran"
 	EUTRANWBS1          = "eutran_wb_s1"
@@ -50,13 +48,11 @@ const (
 	CDMA20001xRTT       = "cdma2000_1xrtt"
 )
 
-// AccessNames are the names of the access technologies, in the order of their bits.
 var AccessNames = []string{
 	UTRAN, EUTRANWBS1, EUTRANNBS1, NGRAN, SatelliteNGRAN, SatelliteEUTRANWBS1, SatelliteEUTRANNBS1, GSM, ECGSMIoT,
 	GSMCompact, CDMA2000HRPD, CDMA20001xRTT,
 }
 
-// AccessLabels are the access technologies' names as the specification writes them, for people.
 var AccessLabels = map[string]string{
 	UTRAN: "UTRAN", EUTRANWBS1: "E-UTRAN WB-S1", EUTRANNBS1: "E-UTRAN NB-S1", NGRAN: "NG-RAN",
 	SatelliteNGRAN: "Satellite NG-RAN", SatelliteEUTRANWBS1: "Satellite E-UTRAN WB-S1",
@@ -70,7 +66,8 @@ var plainBits = map[string]AccessTechnology{
 	CDMA20001xRTT: bitCDMA20001xRTT,
 }
 
-// Names are the access technologies that a selects (TS 31.102 clause 4.2.5, tables 4.2.5.1 and 4.2.5.2).
+// TS 31.102 clause 4.2.5 table 4.2.5.1
+// TS 31.102 clause 4.2.5 table 4.2.5.2
 func (a AccessTechnology) Names() []string {
 	sel := map[string]bool{}
 
@@ -99,7 +96,6 @@ func (a AccessTechnology) Names() []string {
 	return names
 }
 
-// ParseAccess is the Access Technology Identifier that selects the named access technologies.
 func ParseAccess(names []string) (AccessTechnology, error) {
 	if len(names) == 0 {
 		return 0, errors.New("no access technology")
@@ -144,17 +140,14 @@ func ParseAccess(names []string) (AccessTechnology, error) {
 	return a, nil
 }
 
-// SelectorEntry is an entry of a PLMN selector with access technology.
 type SelectorEntry struct {
 	MCC, MNC string
 	Access   AccessTechnology
 }
 
-// Empty is the entry of an unused slot.
 var Empty = SelectorEntry{}
 
-// Encode codes e as its 5 octets: the PLMN as in TS 24.008 clause 10.5.1.3, then the access technology. An empty entry
-// is 'FFFFFF0000'.
+// TS 24.008 clause 10.5.1.3
 func (e SelectorEntry) Encode() ([]byte, error) {
 	if e == Empty {
 		return []byte{0xff, 0xff, 0xff, 0x00, 0x00}, nil
@@ -179,7 +172,6 @@ func (e SelectorEntry) Encode() ([]byte, error) {
 	}, nil
 }
 
-// DecodeSelector decodes the entries of a PLMN selector with access technology. Unused slots are Empty.
 func DecodeSelector(b []byte) ([]SelectorEntry, error) {
 	if len(b)%selectorEntryLength != 0 {
 		return nil, fmt.Errorf("selector of %d octets is not a multiple of %d", len(b), selectorEntryLength)
@@ -212,7 +204,6 @@ func DecodeSelector(b []byte) ([]SelectorEntry, error) {
 	return out, nil
 }
 
-// SlotOffset is the offset of slot n, from 1, of a PLMN selector.
 func SlotOffset(n int) uint16 {
 	return uint16((n - 1) * selectorEntryLength)
 }

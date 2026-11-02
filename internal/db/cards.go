@@ -9,44 +9,33 @@ import (
 	"time"
 )
 
-// Card is a SIM card, the MSISDN it is reached at, and the TAR and key set that OTA commands to it use.
 type Card struct {
-	ICCID string
-	// IMSI is the IMSI on record, empty when unknown: as the operator or an import set it, or as the last IMSI write
-	// that succeeded wrote it. OTA reaches the card by its MSISDN.
+	ICCID       string
 	IMSI        string
 	MSISDN      string
 	Description string
-	// TAR is that of the card's ADF RFM application linked to the USIM (TS 102 226 clause 7.3).
-	TAR []byte
-	// KVN is the version of the key set that OTA commands use.
-	KVN       int
-	KeySets   []KeySet
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	TAR         []byte
+	KVN         int
+	KeySets     []KeySet
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
-// KeySet is an SCP80 key set of a card's security domain.
 type KeySet struct {
-	Version int
-	// Algorithm is "3des" or "aes".
+	Version   int
 	Algorithm string
 	KIc       []byte
 	KID       []byte
-	// CCLength is the length of the key set's cryptographic checksums: 8, or 4 for an AES key set configured so
-	// (TS 102 225 clause 5.1.3.1).
-	CCLength int
-	// Counter is the last CNTR sent with the key set. It is the card's state, kept when the keys are replaced.
-	Counter uint64
+	CCLength  int
+	Counter   uint64
 }
 
-// maxCounter is the largest CNTR, 5 octets (TS 102 225 clause 5.1).
+// ETSI TS 102 225 clause 5.1
 const maxCounter = 1<<40 - 1
 
-// ErrCounterExhausted is a key set whose counter reached its maximum: the card blocks it (TS 102 225 clause 5.1.4).
+// ETSI TS 102 225 clause 5.1.4
 var ErrCounterExhausted = errors.New("key set counter exhausted")
 
-// CreateCard stores a new card with its key sets.
 func (d *DB) CreateCard(ctx context.Context, c Card) (err error) {
 	ctx, span := d.start(ctx, opCreateCard)
 
@@ -69,8 +58,6 @@ func (d *DB) CreateCard(ctx context.Context, c Card) (err error) {
 	})
 }
 
-// NextCounter takes the next counter of a card's key set: one more than the last one sent, stored before it is used,
-// so that no two commands share a counter.
 func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint64, err error) {
 	ctx, span := d.start(ctx, opNextCounter)
 
@@ -81,7 +68,6 @@ func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint
 	err = d.conn.QueryRowContext(ctx, `UPDATE key_sets SET counter = counter + 1 WHERE iccid = ? AND version = ?
 		AND counter < ? RETURNING counter`, iccid, version, maxCounter).Scan(&counter)
 	if errors.Is(err, sql.ErrNoRows) {
-		// The card is gone, or its key set's counter is exhausted.
 		cards, gerr := d.cards(ctx, "WHERE iccid = ?", iccid)
 		if gerr != nil {
 			return 0, gerr
@@ -101,7 +87,6 @@ func (d *DB) NextCounter(ctx context.Context, iccid string, version int) (_ uint
 	return counter, nil
 }
 
-// UpdateCard updates the settings of a card, not its key sets.
 func (d *DB) UpdateCard(ctx context.Context, c Card) (err error) {
 	ctx, span := d.start(ctx, opUpdateCard)
 
@@ -146,7 +131,6 @@ func (d *DB) GetCard(ctx context.Context, iccid string) (_ Card, err error) {
 	return cards[0], nil
 }
 
-// ListCards lists a page, from 1, of the cards by ICCID, and the number of cards.
 func (d *DB) ListCards(ctx context.Context, page, perPage int) (_ []Card, _ int, err error) {
 	ctx, span := d.start(ctx, opListCards)
 
@@ -162,9 +146,6 @@ func (d *DB) ListCards(ctx context.Context, page, perPage int) (_ []Card, _ int,
 	return cards, total, err
 }
 
-// ImportCards stores cards from a vendor's key file: a new card is created, and an existing card gets the IMSI, if the
-// file has one, and key sets of the file, keeping its MSISDN, description, TAR, counters, and key set choice when the file still has
-// that key set; otherwise its first one.
 func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated int, err error) {
 	ctx, span := d.start(ctx, opImportCards)
 
@@ -208,7 +189,6 @@ func (d *DB) ImportCards(ctx context.Context, cards []Card) (created, updated in
 	return created, updated, err
 }
 
-// putKeySets replaces the key sets of a card. A key set version that stays keeps its counter, which is the card's.
 func putKeySets(ctx context.Context, tx *sql.Tx, iccid string, sets []KeySet) error {
 	versions := make([]any, 0, len(sets)+1)
 	versions = append(versions, iccid)
@@ -238,7 +218,6 @@ func ccLengthOf(k KeySet) int {
 	return k.CCLength
 }
 
-// cards are the cards that clause, the end of a SELECT from cards, selects, with their key sets.
 func (d *DB) cards(ctx context.Context, clause string, args ...any) ([]Card, error) {
 	rows, err := d.conn.QueryContext(ctx, `SELECT iccid, imsi, msisdn, description, tar, kvn, created_at, updated_at
 		FROM cards `+clause, args...)
@@ -334,8 +313,6 @@ func affected(res sql.Result) error {
 	return nil
 }
 
-// SetCounter sets the counter of a card's key set: the last CNTR the card accepted, when the card was used elsewhere.
-// A card does not tell its counter (TS 102 225 clause 5.1.4).
 func (d *DB) SetCounter(ctx context.Context, iccid string, version int, counter uint64) (err error) {
 	ctx, span := d.start(ctx, opSetCounter)
 

@@ -19,7 +19,6 @@ import (
 
 const processName = "process jobs"
 
-// named are the ended spans of name, in the order they ended.
 func (e *env) named(name string) []sdktrace.ReadOnlySpan {
 	var out []sdktrace.ReadOnlySpan
 
@@ -32,7 +31,6 @@ func (e *env) named(name string) []sdktrace.ReadOnlySpan {
 	return out
 }
 
-// children are the names of the ended spans whose parent is s.
 func (e *env) children(s sdktrace.ReadOnlySpan) []string {
 	var out []string
 
@@ -54,12 +52,10 @@ func spanAttrs(s sdktrace.ReadOnlySpan) map[attribute.Key]string {
 	return m
 }
 
-// traceParentOf is the traceparent of a span.
 func traceParentOf(s sdktrace.ReadOnlySpan) string {
 	return "00-" + s.SpanContext().TraceID().String() + "-" + s.SpanContext().SpanID().String() + "-01"
 }
 
-// linksTo reports whether s links, in order, to exactly the spans of traceparents.
 func linksTo(s sdktrace.ReadOnlySpan, traceparents ...string) bool {
 	links := s.Links()
 	if len(links) != len(traceparents) {
@@ -75,7 +71,6 @@ func linksTo(s sdktrace.ReadOnlySpan, traceparents ...string) bool {
 	return true
 }
 
-// queueTraced queues a job within the span of a caller, as the API's, and returns it with the caller's traceparent.
 func (e *env) queueTraced(t *testing.T, j db.Job) (int64, string) {
 	t.Helper()
 
@@ -92,7 +87,6 @@ func (e *env) queueTraced(t *testing.T, j db.Job) (int64, string) {
 	return ids[0], tracing.TraceParent(ctx)
 }
 
-// TestIdleStepUntraced checks that a step with nothing to do makes no span: the runner polls every few seconds.
 func TestIdleStepUntraced(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	before := len(e.spans.Ended())
@@ -105,9 +99,6 @@ func TestIdleStepUntraced(t *testing.T) {
 	}
 }
 
-// TestProcessSpan checks that sending a job's command is a consumer span of its own trace, linked to the request that
-// created the job, with the job, its card and its outcome; that its submit_sm is a client span to the SMSC; and that
-// the job keeps the span as its command's trace context.
 func TestProcessSpan(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id, created := e.queueTraced(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -167,8 +158,6 @@ func TestProcessSpan(t *testing.T) {
 	}
 }
 
-// TestProcessSpanSteps checks that each command of a read of several is a process span of its own, linked to the
-// job's creation and to the sending of the command before.
 func TestProcessSpanSteps(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id, created := e.queueTraced(t, db.Job{Operation: db.OperationOPLMNRead})
@@ -190,8 +179,6 @@ func TestProcessSpanSteps(t *testing.T) {
 	}
 }
 
-// TestProcessSpanOutcomes checks the outcome of a job's processing: a command that the SMSC throttles is sent again
-// later, which is no error of the processing but one of its submit_sm; a job that cannot be sent fails, an error.
 func TestProcessSpanOutcomes(t *testing.T) {
 	t.Run("retry", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))
@@ -232,8 +219,6 @@ func TestProcessSpanOutcomes(t *testing.T) {
 	})
 }
 
-// TestExpiredSpan checks that a job that the runner closes without an answer is a process span of its own, an error,
-// linked to the job's creation and to its command's sending.
 func TestExpiredSpan(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id, created := e.queueTraced(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
@@ -261,7 +246,6 @@ func TestExpiredSpan(t *testing.T) {
 	}
 }
 
-// delivered waits for the n-th deliver_sm span to end, once its deliver_sm_resp is written, and returns the spans.
 func (e *env) delivered(t *testing.T, n int) []sdktrace.ReadOnlySpan {
 	t.Helper()
 
@@ -276,9 +260,6 @@ func (e *env) delivered(t *testing.T, n int) []sdktrace.ReadOnlySpan {
 	}
 }
 
-// TestDeliverSpans checks that a deliver_sm is a server span of a trace of its own, linked, once it matches a job, to
-// the request that created it and to the sending of the command it answers; and that its kind, outcome and the job's
-// status tell what it did, without making a job that fails an error of the deliver_sm.
 func TestDeliverSpans(t *testing.T) {
 	e := newEnv(t, "+15550000001", sja5(t))
 	id, created := e.queueTraced(t, db.Job{Operation: db.OperationOPLMNClear, Slot: 2})
@@ -287,7 +268,6 @@ func TestDeliverSpans(t *testing.T) {
 
 	sent := e.job(t, id).CommandTraceParent
 
-	// As Ella SMSC sends them: the PoR, then the receipt, which finds the job closed.
 	e.answer(t, id, ota.StatusPoROK, "039000ffffff0000")
 
 	spans := e.delivered(t, 2)
@@ -319,7 +299,6 @@ func TestDeliverSpans(t *testing.T) {
 	}
 }
 
-// TestDeliverSpanOutcomes checks the outcomes of the deliver_sm that a job meets.
 func TestDeliverSpanOutcomes(t *testing.T) {
 	t.Run("receipt then late PoR", func(t *testing.T) {
 		e := newEnv(t, "+15550000001", sja5(t))

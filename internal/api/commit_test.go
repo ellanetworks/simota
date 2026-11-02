@@ -14,8 +14,6 @@ import (
 	"github.com/ellanetworks/simota/internal/gateway"
 )
 
-// disconnectingStore is the store of a client that goes away just after its change is committed: it cancels the
-// request's context once PutSMSC or CreateJobs succeeds, as net/http does when the connection closes.
 type disconnectingStore struct {
 	*db.DB
 
@@ -40,8 +38,6 @@ func (s *disconnectingStore) CreateJobs(ctx context.Context, jobs []db.Job) ([]i
 	return ids, err
 }
 
-// TestCommittedChangeOutlivesClient checks that the effects of a committed change, applying the SMSC settings and
-// waking the runner, happen though the client goes away before the response.
 func TestCommittedChangeOutlivesClient(t *testing.T) {
 	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "simota.db"))
 	if err != nil {

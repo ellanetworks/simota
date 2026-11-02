@@ -16,14 +16,12 @@ export default function ImportCardsDialog({
   const queryClient = useQueryClient();
   const { showSnackbar } = useSnackbar();
   const [file, setFile] = useState<File | null>(null);
-  // A key file does not tell its key sets' algorithm: it is chosen, with no default.
   const [algorithm, setAlgorithm] = useState<KeyAlgorithm | "">("");
   const [ccLength, setCcLength] = useState<CCLength>(8);
 
   const mutation = useMutation({
     mutationFn: async () => {
       const text = await file!.text();
-      // An empty file would import nothing: say so, rather than "Imported 0 cards".
       if (text.trim() === "") throw new Error(`${file!.name} is empty.`);
       return importCards(text, {
         algorithm: algorithm as KeyAlgorithm,

@@ -1,5 +1,3 @@
-// Package cardfile reads a card vendor's key file, such as sysmocom's: a header row, then a row per card, separated by
-// tabs or commas.
 package cardfile
 
 import (
@@ -15,15 +13,12 @@ import (
 	"strings"
 )
 
-// Card is a card of a key file: only what OTA needs. Ki, OPc, PINs, ADM keys and KIKs are left out.
 type Card struct {
-	ICCID string
-	// IMSI is empty when the file has none.
+	ICCID   string
 	IMSI    string
 	KeySets []KeySet
 }
 
-// KeySet is the ciphering and integrity keys of a key set number.
 type KeySet struct {
 	Version  int
 	KIc, KID []byte
@@ -37,9 +32,6 @@ var (
 
 var ErrFormat = errors.New("invalid key file")
 
-// Parse reads the cards of a key file whose key sets use algorithm, "3des" or "aes": a key file does not tell it, and
-// key lengths do not either (TS 102 225 clauses 5.1.2, 5.1.3). A card needs an ICCID and a key set with KIc and KID of
-// the algorithm's length; a key set that lacks either is left out. The IMSI, informational, is read when given.
 func Parse(r io.Reader, algorithm string) ([]Card, error) {
 	lengths, ok := map[string][]int{"3des": {16}, "aes": {16, 24, 32}}[algorithm]
 	if !ok {
@@ -167,8 +159,7 @@ func Parse(r io.Reader, algorithm string) ([]Card, error) {
 	return cards, nil
 }
 
-// NormalICCID is an ICCID without the 'F' that pads an odd number of digits, as some files print it (TS 102 221
-// clause 13.2).
+// ETSI TS 102 221 clause 13.2
 func NormalICCID(s string) string {
 	if strings.HasSuffix(s, "F") || strings.HasSuffix(s, "f") {
 		return s[:len(s)-1]

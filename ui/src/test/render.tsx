@@ -5,7 +5,6 @@ import { ThemeProvider } from "@mui/material/styles";
 import { SnackbarProvider } from "@/contexts/SnackbarContext";
 import theme, { THEME_PROVIDER_PROPS } from "@/utils/theme";
 
-// renderWithClient renders ui with a query client that does not retry. The theme mode is not stored.
 export const renderWithClient = (ui: ReactElement) => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },

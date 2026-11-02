@@ -6,11 +6,11 @@ import (
 	"fmt"
 )
 
-// responseUDH is the user data header of a Response Packet in a single short message: its length, then the RPI as
-// IEIa '71' with a null IEDa (TS 31.115 clause 4.4).
+// TS 31.115 clause 4.4
 var responseUDH = []byte{0x02, 0x71, 0x00}
 
-// Status is the Response Status Code of a Response Packet (TS 102 225 clause 5.2.2, TS 31.115 clause 7).
+// ETSI TS 102 225 clause 5.2 table 5
+// TS 31.115 clause 7
 type Status uint8
 
 const (
@@ -45,7 +45,6 @@ var statusNames = map[Status]string{
 	StatusResponseInUSSD:            "response_in_ussd",
 }
 
-// statusLabels are the words of the statuses in a job's error, the UI's labels in a sentence.
 var statusLabels = map[Status]string{
 	StatusPoROK:                     "OK",
 	StatusIntegrityFailed:           "checksum failed",
@@ -62,7 +61,6 @@ var statusLabels = map[Status]string{
 	StatusResponseInUSSD:            "answer by USSD",
 }
 
-// Label is s in words with its code, such as "counter too low (02)", or "proprietary C0".
 func (s Status) Label() string {
 	if l, ok := statusLabels[s]; ok {
 		return fmt.Sprintf("%s (%02X)", l, byte(s))
@@ -80,7 +78,6 @@ func (s Status) String() string {
 		return n
 	}
 
-	// 'C0' to 'FE' are proprietary; the others are reserved (TS 102 225 table 5).
 	if s >= 0xc0 && s <= 0xfe {
 		return fmt.Sprintf("proprietary_%02x", byte(s))
 	}
@@ -90,31 +87,22 @@ func (s Status) String() string {
 
 var ErrNotResponse = errors.New("not a response packet")
 
-// Response is a Response Packet.
 type Response struct {
-	TAR     [3]byte
-	Counter uint64
-	Status  Status
-	// Unsecured is a response without security, which a card that cannot authenticate the Sending Entity may send.
+	TAR       [3]byte
+	Counter   uint64
+	Status    Status
 	Unsecured bool
-	// Data is the additional response data, such as the response of a remote management script (TS 102 226), without
-	// its padding.
-	Data []byte
+	Data      []byte
 }
 
-// DecodeResponse decodes the Response Packet in the TP-UDH and TP-UD of an SMS-DELIVER-REPORT or SMS-SUBMIT, secured as
-// SPI asks (TS 31.115 clause 4.4).
+// TS 31.115 clause 4.4
 func DecodeResponse(k Keyset, udh, ud []byte) (Response, error) {
 	return decodeResponse(k, SPI, udh, ud)
 }
 
-// decodeResponse is DecodeResponse of the PoR to a command of another SPI, of which only the PoR's ciphering and
-// integrity matter, for the tests' vectors.
 func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
 	ciphered, integrity := spi&spiPoRCiphering != 0, spi&spiPoRIntegrity
 
-	// The card cannot tell the ME to set the TP-UDHI of its Response Packet, so a Response Packet may arrive without
-	// one, and is then read as if it were set (TS 31.115 clause 4.1).
 	if len(udh) == 0 && bytes.HasPrefix(ud, responseUDH) {
 		udh, ud = ud[:len(responseUDH)], ud[len(responseUDH):]
 	}
@@ -123,7 +111,6 @@ func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
 		return Response{}, fmt.Errorf("%w: user data header %x", ErrNotResponse, udh)
 	}
 
-	// RPL 2, RHL 1, TAR 3.
 	if len(ud) < 6 {
 		return Response{}, fmt.Errorf("response: %d octets is too short", len(ud))
 	}
@@ -137,8 +124,6 @@ func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
 	header := ud[:6]
 	body := ud[6:]
 
-	// A card that cannot authenticate the Sending Entity may answer with an error status, no security and a zero
-	// counter (TS 102 225 clause 4.1).
 	if rhl == 10 && len(body) == counterLength+2 && Status(body[counterLength+1]) != StatusPoROK &&
 		bytes.Equal(body[:counterLength], make([]byte, counterLength)) && (ciphered || integrity != 0) {
 		r := Response{Status: Status(body[counterLength+1]), Unsecured: true}
@@ -154,7 +139,6 @@ func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
 		return Response{}, errors.New("response: only a cryptographic checksum or no integrity is supported")
 	}
 
-	// RHL counts TAR to the end of the RC/CC/DS: TAR 3, CNTR 5, PCNTR 1, status 1.
 	if rhl != 10+ccLen {
 		return Response{}, fmt.Errorf("response: RHL %d, want %d", rhl, 10+ccLen)
 	}
@@ -184,7 +168,6 @@ func decodeResponse(k Keyset, spi uint16, udh, ud []byte) (Response, error) {
 	data := body[counterLength+2+ccLen:]
 
 	if ccLen > 0 {
-		// The UDH, RPL and RHL are part of the checksum in SMS (TS 31.115 clause 4.4).
 		if err := k.verify(concat(responseUDH, header, body[:counterLength+2], data), cc); err != nil {
 			return Response{}, fmt.Errorf("response: %w", err)
 		}

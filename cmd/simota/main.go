@@ -1,5 +1,3 @@
-// Command simota is a minimal SIM OTA platform: it keeps cards and their OTA keys, and runs Remote File Management
-// jobs on them through an SMSC, such as Ella SMSC, as an SMPP 3.4 client.
 package main
 
 import (
@@ -30,10 +28,7 @@ import (
 const (
 	version = "v0.0.1"
 
-	// jobInterval is how often the runner sends the queued jobs, when not woken sooner.
-	jobInterval = 2 * time.Second
-	// shutdownTimeout is how long the API has to finish its requests on stop, then the SMPP session to unbind, and
-	// last the spans left to be exported.
+	jobInterval     = 2 * time.Second
 	shutdownTimeout = 5 * time.Second
 )
 
@@ -62,7 +57,6 @@ func main() {
 	}
 }
 
-// run runs simota until ctx ends, or its API fails to serve, then stops it.
 func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -72,7 +66,6 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	// The spans are exported last, once everything that makes them has stopped, in a time of their own.
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
@@ -90,8 +83,6 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 
 	defer func() { _ = store.Close() }()
 
-	// One SMPP session to the SMSC per process, bound as a transceiver: the runner submits on it and takes the
-	// SMSC's deliver_sm from it.
 	var runner *jobs.Runner
 
 	gw := gateway.New(gateway.Config{
@@ -102,7 +93,6 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		Logger:         logger,
 	})
 
-	// The runner reads the originator and validity as set over the API at each step.
 	runner = jobs.NewRunner(store, func(ctx context.Context) (jobs.Gateway, error) {
 		s, err := store.GetSMSC(ctx)
 		if errors.Is(err, db.ErrNotFound) {
@@ -157,9 +147,6 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// The API, the runner and the session stop in turn, each in its own time, so that a slow one does not take the
-	// next one's: the API finishes its requests, the runner the job it is on, within its job timeout, and the session
-	// then unbinds, after the runner's last submit_sm and once the deliver_sm in progress are answered.
 	if serr := shutdownAPI(srv); serr != nil && err == nil {
 		err = serr
 	}
@@ -176,8 +163,6 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	return err
 }
 
-// newTracerProvider returns the provider of simota's spans, nil when telemetry is off, and the function that exports the
-// spans left and stops it.
 func newTracerProvider(ctx context.Context, cfg config.Telemetry, logger *slog.Logger) (trace.TracerProvider,
 	func(context.Context) error, error,
 ) {
@@ -193,8 +178,6 @@ func newTracerProvider(ctx context.Context, cfg config.Telemetry, logger *slog.L
 	return tp, tp.Shutdown, nil
 }
 
-// shutdownAPI lets the API's requests finish within shutdownTimeout, then closes their connections, which ends their
-// contexts, so that they stop before the store closes.
 func shutdownAPI(srv *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()

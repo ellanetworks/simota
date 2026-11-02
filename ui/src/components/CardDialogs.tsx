@@ -27,19 +27,16 @@ import {
   keyHelp,
 } from "@/utils/cards";
 
-// DEFAULT_TAR is the first ADF RFM application linked to the USIM.
 export const DEFAULT_TAR = "b00001";
 
 export const algorithmLabel = (algorithm: KeyAlgorithm): string =>
   algorithm === "3des" ? "3DES" : "AES";
 
-// keySetLabel is a key set, such as "1 (3DES, counter 3)", with the length of its checksums when AES may shorten it.
 export const keySetLabel = (k: KeySet): string =>
   `${k.version} (${algorithmLabel(k.algorithm)}` +
   (k.algorithm === "aes" ? `, CC ${k.cc_length}` : "") +
   `, counter ${k.counter})`;
 
-// CCLengthField chooses the length of an AES key set's cryptographic checksums.
 export function CCLengthField({
   value,
   onChange,
@@ -61,14 +58,11 @@ export function CCLengthField({
   );
 }
 
-// errorFor is the error of a field, shown once something is typed: an empty required field only keeps the form
-// from submitting.
 const errorFor = (value: string, valid: boolean, message: string) =>
   value === "" || valid ? undefined : message;
 
 const hex = (value: string) => value.replace(/\s/g, "");
 
-// HexField is a key in hex. Keys are write-only: the server never returns them.
 function HexField(props: TextFieldProps) {
   return (
     <TextField
@@ -79,7 +73,6 @@ function HexField(props: TextFieldProps) {
   );
 }
 
-// The fields a card's add and edit dialogs share.
 interface Profile {
   imsi: string;
   msisdn: string;
@@ -183,7 +176,6 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
           {
             version: Number(version),
             algorithm,
-            // A 3DES key set's checksums are 8 bytes, the server's default.
             ...(algorithm === "aes" && { cc_length: ccLength }),
             kic,
             kid,
@@ -198,7 +190,6 @@ export function AddCardDialog({ onClose }: { onClose: () => void }) {
   });
 
   const versionNumber = Number(version);
-  // A key set version is the 4 bits of the KIc and KID that name it.
   const versionValid =
     /^\d+$/.test(version) && versionNumber >= 1 && versionNumber <= 15;
   const iccidError = errorFor(

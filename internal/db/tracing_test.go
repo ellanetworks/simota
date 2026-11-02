@@ -16,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// traced is a store traced to a span recorder, and a tracer of the same provider for the callers' spans.
 type traced struct {
 	*db.DB
 
@@ -40,14 +39,12 @@ func openTraced(t *testing.T) traced {
 	return traced{DB: d, spans: spans, tracer: tp.Tracer("test")}
 }
 
-// caller starts the span of a caller of the store.
 func (s traced) caller(t *testing.T) (context.Context, trace.Span) {
 	t.Helper()
 
 	return s.tracer.Start(t.Context(), "caller")
 }
 
-// operations are the ended spans of the store, not the callers'.
 func (s traced) operations() []sdktrace.ReadOnlySpan {
 	var out []sdktrace.ReadOnlySpan
 
@@ -69,7 +66,6 @@ func attrs(s sdktrace.ReadOnlySpan) map[attribute.Key]string {
 	return m
 }
 
-// TestNoSpanWithoutCaller checks that the store makes no span of its own, as for the runner's poll for jobs.
 func TestNoSpanWithoutCaller(t *testing.T) {
 	s := openTraced(t)
 
@@ -82,8 +78,6 @@ func TestNoSpanWithoutCaller(t *testing.T) {
 	}
 }
 
-// TestOperationSpans checks that each operation within a caller's span is a client span, its child, named by its query
-// summary, with the operation and the table only when it has one of each.
 func TestOperationSpans(t *testing.T) {
 	s := openTraced(t)
 	ctx, parent := s.caller(t)
@@ -150,8 +144,6 @@ func TestOperationSpans(t *testing.T) {
 	}
 }
 
-// TestOperationErrors checks that a failure of the database is an error of its span, with the SQLite result code,
-// and that an outcome the store reports by design, such as not found, is not.
 func TestOperationErrors(t *testing.T) {
 	s := openTraced(t)
 	ctx, parent := s.caller(t)
@@ -160,7 +152,6 @@ func TestOperationErrors(t *testing.T) {
 		t.Fatalf("GetJob = %v, want ErrNotFound", err)
 	}
 
-	// The schema refuses a system_id of 16 characters: SQLITE_CONSTRAINT_CHECK.
 	if _, err := s.PutSMSC(ctx, db.SMSC{
 		Host: "h", Port: 2775, SystemID: "0123456789abcdef", Password: "pw", Originator: "+15550001000", Validity: time.Hour,
 	}); err == nil {
@@ -195,8 +186,6 @@ func TestOperationErrors(t *testing.T) {
 	}
 }
 
-// TestStoredTraceContext checks that a job keeps the trace context of the caller that created it, and of the one that
-// sent its command, not that of the store's own span, and none when untraced.
 func TestStoredTraceContext(t *testing.T) {
 	s := openTraced(t)
 
@@ -251,8 +240,6 @@ func TestStoredTraceContext(t *testing.T) {
 	}
 }
 
-// TestCallerSpanLeftOpen checks that a store that makes no span, untraced, leaves the caller's span as it is: open,
-// and not an error for an outcome of its own.
 func TestCallerSpanLeftOpen(t *testing.T) {
 	d, _ := open(t)
 	spans := tracetest.NewSpanRecorder()

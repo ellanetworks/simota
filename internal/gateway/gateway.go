@@ -1,5 +1,3 @@
-// Package gateway keeps simota's SMPP 3.4 session to the SMSC, such as Ella SMSC: one transceiver bind per process
-// (SMPP 3.4 section 2.2), bound again with smpp's backoff whenever it is lost, with the SMSC settings as set.
 package gateway
 
 import (
@@ -21,10 +19,8 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-// closeTimeout bounds the unbind of a session being replaced.
 const closeTimeout = 5 * time.Second
 
-// Settings are what the session connects and binds with.
 type Settings struct {
 	Host     string
 	Port     int
@@ -33,46 +29,35 @@ type Settings struct {
 	Password string
 }
 
-// SettingsOf are the connection settings of an SMSC.
 func SettingsOf(s db.SMSC) Settings {
 	return Settings{Host: s.Host, Port: s.Port, TLS: s.TLS, SystemID: s.SystemID, Password: s.Password}
 }
 
-// Status is where the session is.
 type Status string
 
 const (
-	// StatusUnset is no SMSC set.
 	StatusUnset        Status = "unset"
 	StatusConnecting   Status = "connecting"
 	StatusBound        Status = "bound"
 	StatusDisconnected Status = "disconnected"
 )
 
-// State is the session's state, as the API shows it.
 type State struct {
-	Status Status
-	// Since is when Status was entered.
-	Since time.Time
-	// SystemID is the SMSC's, while bound.
-	SystemID string
-	// LastError is the last failure to connect, to bind, or of the bound session, at LastErrorAt.
+	Status      Status
+	Since       time.Time
+	SystemID    string
 	LastError   string
 	LastErrorAt time.Time
 }
 
-// Config configures a Gateway.
 type Config struct {
-	// Handler handles the SMSC's deliver_sm: delivery receipts and SIM answers.
-	Handler smpp.Handler
-	// TracerProvider, when set, traces the submit_sm made within a caller's span.
+	Handler        smpp.Handler
 	TracerProvider trace.TracerProvider
 	Logger         *slog.Logger
 }
 
 const tracerName = "github.com/ellanetworks/simota/internal/gateway"
 
-// Gateway is the session to the SMSC. It is safe for concurrent use.
 type Gateway struct {
 	cfg    Config
 	tracer trace.Tracer
@@ -96,9 +81,6 @@ func New(cfg Config) *Gateway {
 	return &Gateway{cfg: cfg, tracer: tp.Tracer(tracerName, trace.WithSchemaURL(semconv.SchemaURL)), since: time.Now()}
 }
 
-// Apply connects with s, after unbinding a session with other settings, or disconnects when s is nil. Settings
-// equal to those in use change nothing. The unbind is part of the change that ctx makes, but is not cut short when
-// ctx ends: it is bounded by closeTimeout, so that the SMSC sees the session go.
 func (g *Gateway) Apply(ctx context.Context, s *Settings) error {
 	g.mu.Lock()
 
@@ -135,7 +117,6 @@ func (g *Gateway) Apply(ctx context.Context, s *Settings) error {
 }
 
 func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
-	// A TLS connection verifies the SMSC's certificate against the system's roots.
 	var tlsConfig *tls.Config
 	if s.TLS {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -153,8 +134,6 @@ func (g *Gateway) newClient(s Settings) (*smpp.Client, error) {
 	})
 }
 
-// SubmitSM submits a short message and returns its message_id, or smpp.ErrNoSession while not bound. Within a
-// caller's span, it is a client span of the RPC conventions, submit_sm, to the SMSC as set.
 func (g *Gateway) SubmitSM(ctx context.Context, m *smpp.SubmitSM) (id string, err error) {
 	g.mu.Lock()
 	c, s := g.client, g.settings
@@ -188,7 +167,6 @@ func (g *Gateway) SubmitSM(ctx context.Context, m *smpp.SubmitSM) (id string, er
 	return c.SubmitSM(ctx, m)
 }
 
-// Bound reports whether the session is bound.
 func (g *Gateway) Bound() bool {
 	g.mu.Lock()
 	c := g.client
@@ -197,7 +175,6 @@ func (g *Gateway) Bound() bool {
 	return c != nil && c.State().Status == smpp.ConnBound
 }
 
-// State is the session's state.
 func (g *Gateway) State() State {
 	g.mu.Lock()
 	c, since := g.client, g.since
@@ -225,8 +202,6 @@ func (g *Gateway) State() State {
 	return out
 }
 
-// errorText is err for the operator, as a sentence without the "smpp: " of each error it wraps, and a refused bind as
-// its command_status, such as "Bind refused: ESME_RBINDFAIL".
 func errorText(err error) string {
 	s := err.Error()
 
@@ -243,7 +218,6 @@ func errorText(err error) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// Close unbinds the session until ctx ends.
 func (g *Gateway) Close(ctx context.Context) error {
 	g.mu.Lock()
 	c := g.client

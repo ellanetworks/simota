@@ -71,7 +71,6 @@ const clear = job({
   error: "The card answered 6a82: file not found.",
 });
 
-// serve is the jobs API over jobs, newest first. It records the list requests.
 const serve = (
   jobs: Job[] = [unconfirmed, read, set, clear],
   smscSet = true,
@@ -209,7 +208,6 @@ describe("Jobs", () => {
     renderWithClient(<Jobs />);
     await screen.findByText("1–2 of 2");
 
-    // Part of an ICCID is a search, not an error.
     fireEvent.change(screen.getByRole("textbox", { name: "Search" }), {
       target: { value: "9216" },
     });

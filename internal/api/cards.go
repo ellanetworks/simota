@@ -13,7 +13,7 @@ import (
 	"github.com/ellanetworks/simota/internal/db"
 )
 
-// defaultTAR is the first TAR of the ADF RFM applications in the compact format (TS 101 220 table D.1).
+// ETSI TS 101 220 annex D table D.1
 var defaultTAR = []byte{0xb0, 0x00, 0x01}
 
 var (
@@ -22,10 +22,8 @@ var (
 	msisdnRE = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
 )
 
-// Card is a card without its keys: the API never returns key material.
 type Card struct {
-	ICCID string `json:"iccid"`
-	// IMSI is the IMSI on record, absent when unknown: OTA reaches the card by its MSISDN.
+	ICCID       string         `json:"iccid"`
 	IMSI        string         `json:"imsi,omitempty"`
 	MSISDN      string         `json:"msisdn"`
 	Description string         `json:"description"`
@@ -36,13 +34,11 @@ type Card struct {
 	UpdatedAt   string         `json:"updated_at"`
 }
 
-// KeySetStatus is a key set without its keys.
 type KeySetStatus struct {
 	Version   int    `json:"version"`
 	Algorithm string `json:"algorithm"`
 	CCLength  int    `json:"cc_length"`
-	// Counter is the last CNTR sent with the key set.
-	Counter uint64 `json:"counter"`
+	Counter   uint64 `json:"counter"`
 }
 
 type ListCardsResponse struct {
@@ -67,8 +63,7 @@ type KeySetParams struct {
 	Algorithm string `json:"algorithm"`
 	KIc       string `json:"kic"`
 	KID       string `json:"kid"`
-	// CCLength is that of an AES key set's checksums, 4 or 8; 0 is 8.
-	CCLength int `json:"cc_length"`
+	CCLength  int    `json:"cc_length"`
 }
 
 type UpdateCardParams struct {
@@ -219,8 +214,6 @@ func DeleteCard(cfg Config) http.Handler {
 	})
 }
 
-// ImportCards stores the cards of a vendor's key file, sent as the request body. The algorithm query parameter, 3des
-// or aes, tells the key sets' algorithm, and cc_length, 4 or 8, the length of an AES key set's checksums.
 func ImportCards(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -357,10 +350,8 @@ func validate(c db.Card) error {
 	return nil
 }
 
-// parseTAR is the TAR of the RFM application whose current directory is ADF.USIM at the start of a script (TS 102 226
-// clause 7.3): one of the ADF range, 'B0 00 01' or 'B0 00 20' to 'B0 01 1F' (TS 101 220 table D.1), or of the SIM
-// File System range, 'B0 00 10' to 'B0 00 1F', where some cards put it, such as the sysmoISIM-SJA5 at 'B0 00 11'. A
-// TAR that leads elsewhere fails a job's first SELECT.
+// ETSI TS 102 226 clause 7.3
+// ETSI TS 101 220 annex D table D.1
 func parseTAR(s string) ([]byte, error) {
 	if s == "" {
 		return defaultTAR, nil
@@ -393,11 +384,9 @@ func cardResponse(c db.Card) Card {
 }
 
 type KeySetUpdateParams struct {
-	// Counter is the last counter the card accepted with the key set; the next command uses one more.
 	Counter *uint64 `json:"counter"`
 }
 
-// UpdateKeySet sets the counter of a card's key set, for a card used before by another sending entity.
 func UpdateKeySet(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var p KeySetUpdateParams
@@ -439,5 +428,5 @@ func UpdateKeySet(cfg Config) http.Handler {
 	})
 }
 
-// maxCounter is the largest CNTR, 5 octets (TS 102 225 clause 5.1).
+// ETSI TS 102 225 clause 5.1
 const maxCounter = 1<<40 - 1

@@ -12,20 +12,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// RPCSystemSMPP is the rpc.system.name of the spans of SMPP operations, as Ella SMSC's are: SMPP is no RPC system
-// that the conventions name, and they let a system name its own.
 const RPCSystemSMPP = "smpp"
 
-// SMPPAttributes are the attributes of the span of SMPP operation id, which the span is named after (OpenTelemetry
-// semantic conventions, RPC spans).
 func SMPPAttributes(id smpp.CommandID) []attribute.KeyValue {
 	return []attribute.KeyValue{semconv.RPCSystemNameKey.String(RPCSystemSMPP), semconv.RPCMethod(id.String())}
 }
 
-// EndSMPP ends the span of an SMPP operation: with rpc.response.status_code the command_status of its response, when
-// there is one, which err carries when the peer refused the request; and as an error, of the low-cardinality
-// error.type that Ella SMSC also gives, when status is not ESME_ROK or err tells another failure. For a server's
-// operation, status is its answer, and err, if any, why it answered so, or why its answer could not be written.
 func EndSMPP(span trace.Span, status *smpp.CommandStatus, err error) {
 	defer span.End()
 
@@ -69,8 +61,6 @@ func EndSMPP(span trace.Span, status *smpp.CommandStatus, err error) {
 	}
 }
 
-// statusErrorType is the error.type of a command_status: its name, or _OTHER for one that SMPP 3.4 does not name,
-// which a peer chooses.
 func statusErrorType(status smpp.CommandStatus) string {
 	if name := status.String(); strings.HasPrefix(name, "ESME_") {
 		return name

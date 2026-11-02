@@ -119,7 +119,6 @@ func TestCardLifecycle(t *testing.T) {
 		t.Fatalf("update to a missing key set = %d", code)
 	}
 
-	// The IMSI is optional: without one, the card shows none.
 	code, body = e.do(t, http.MethodPut, "/api/v1/cards/8988211000000000017", "application/json",
 		`{"msisdn":"+15550000002","description":"A56","tar":"b00001","kvn":1}`)
 	if code != http.StatusOK || strings.Contains(body, `"imsi"`) {
@@ -187,7 +186,6 @@ func TestImportCards(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The import replaces the IMSI and key sets, and keeps the MSISDN.
 	if c.Result.IMSI != "999700000000001" || c.Result.MSISDN != "+15550000001" || len(c.Result.KeySets) != 2 {
 		t.Fatalf("card = %+v", c.Result)
 	}
@@ -206,7 +204,6 @@ func TestImportCards(t *testing.T) {
 		}
 	}
 
-	// AES-128 keys with 4-octet checksums.
 	aes := strings.Replace(file, "8988211000000000025", "8988211000000000033", 1)
 	if code, body := e.do(t, http.MethodPost, "/api/v1/cards/import?algorithm=aes&cc_length=4", "text/plain", aes); code != http.StatusOK {
 		t.Fatalf("AES import = %d %s", code, body)
@@ -304,7 +301,6 @@ func TestListCardsPages(t *testing.T) {
 		t.Fatalf("page = %+v", page.Result)
 	}
 
-	// Timestamps have milliseconds, as in Ella SMSC and Ella IMS.
 	if ts := page.Result.Items[0].CreatedAt; len(ts) != len("2026-10-28T17:34:53.000Z") || !strings.HasSuffix(ts, "Z") {
 		t.Fatalf("created_at = %q", ts)
 	}
@@ -345,7 +341,6 @@ func TestHealthAndSpec(t *testing.T) {
 	}
 }
 
-// TestOpenAPISpecCoversRoutes checks that the specification documents every route.
 func TestOpenAPISpecCoversRoutes(t *testing.T) {
 	e := newEnv(t)
 
@@ -377,8 +372,7 @@ func itoa(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
 
-// TestICCIDPadding checks that an ICCID with the 'F' padding of an odd number of digits names the same card (TS 102 221
-// clause 13.2).
+// ETSI TS 102 221 clause 13.2
 func TestICCIDPadding(t *testing.T) {
 	e := newEnv(t)
 
@@ -405,7 +399,6 @@ func TestUpdateKeySetCounter(t *testing.T) {
 		t.Fatalf("set counter = %d %s", code, body)
 	}
 
-	// The next command takes one more.
 	if got, err := e.store.NextCounter(context.Background(), "8988211000000000017", 1); err != nil || got != 17 {
 		t.Fatalf("next counter = %d, %v", got, err)
 	}
@@ -467,7 +460,6 @@ func TestReadyz(t *testing.T) {
 		t.Fatalf("not ready = %d %s", code, body)
 	}
 
-	// Liveness does not depend on readiness.
 	if code, _ := get("/api/v1/livez"); code != http.StatusNoContent {
 		t.Fatalf("livez while not ready: code = %d", code)
 	}

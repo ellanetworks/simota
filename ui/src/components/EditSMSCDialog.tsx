@@ -46,7 +46,6 @@ export default function EditSMSCDialog({
         port: portOf(port)!,
         tls,
         system_id: systemID,
-        // An empty password keeps the one set: it is sent only when typed.
         ...(password !== "" && { password }),
         originator,
         validity_seconds: validitySeconds(validity)!,

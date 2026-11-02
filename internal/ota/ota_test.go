@@ -18,7 +18,6 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// sja5 is key set 1 of a sysmoISIM-SJA5. The packets of the tests that use it were exchanged with the card.
 func sja5(t *testing.T) Keyset {
 	return Keyset{
 		Version:   1,
@@ -28,7 +27,6 @@ func sja5(t *testing.T) Keyset {
 	}
 }
 
-// pysim3DES is key set 3 of the triple DES tests of pySim (tests/unittests/test_ota.py).
 func pysim3DES(t *testing.T) Keyset {
 	return Keyset{
 		Version:   3,
@@ -38,7 +36,6 @@ func pysim3DES(t *testing.T) Keyset {
 	}
 }
 
-// pysimAES is key set 2 of the AES tests of pySim.
 func pysimAES(t *testing.T) Keyset {
 	return Keyset{
 		Version:   2,
@@ -48,17 +45,14 @@ func pysimAES(t *testing.T) Keyset {
 	}
 }
 
-// secured is SPI without the counter, that of the vectors of the SJA5 and of pySim: a ciphered command with a CC that
-// asks for a ciphered PoR with a CC. signed asks for a PoR with a CC, not ciphered, and plain for an unsecured PoR.
 const (
 	secured uint16 = 0x0619
 	signed  uint16 = 0x0609
 	plain   uint16 = 0x0601
 )
 
-// TestSPI checks that SPI is valid and what simota needs (TS 102 225 clause 5.1.1): a ciphered command with a
-// cryptographic checksum and a counter that must be higher, which AES requires (clause 5.1.2); a PoR always, of the
-// command's integrity, which a ciphered PoR needs ciphered with a cryptographic checksum, in the SMS-DELIVER-REPORT.
+// ETSI TS 102 225 clause 5.1.1
+// ETSI TS 102 225 clause 5.1.2
 func TestSPI(t *testing.T) {
 	first, second := byte(SPI>>8), byte(SPI&0xff)
 
@@ -83,8 +77,7 @@ func TestSPI(t *testing.T) {
 	}
 }
 
-// encodeResponse codes r as the card would answer a command of spi: the TP-UDH and TP-UD of its SMS-DELIVER-REPORT
-// (TS 31.115 clause 4.4).
+// TS 31.115 clause 4.4
 func encodeResponse(t *testing.T, k Keyset, spi uint16, r Response) (udh, ud []byte) {
 	t.Helper()
 
@@ -182,8 +175,6 @@ func TestEncodeCommand(t *testing.T) {
 	}
 }
 
-// TestEncodeCommandAES checks AES ciphering and CMAC against pySim, whose vector has no counter, which TS 102 225
-// forbids with AES and SPI always has.
 func TestEncodeCommandAES(t *testing.T) {
 	c := Command{Keyset: pysimAES(t), TAR: [3]byte{0xb0, 0x00, 0x11}, Data: mustHex(t, "00a40004023f00")}
 
@@ -213,8 +204,7 @@ func TestEncodeCommandRejects(t *testing.T) {
 	}
 }
 
-// TestEncodeCommandCipheredWithoutCC checks pySim's ciphered command without CC, of SPI '04 19'. pySim sets the unused
-// KID to the key set; it is zero here (TS 102 225 clause 5.1).
+// ETSI TS 102 225 clause 5.1
 func TestEncodeCommandCipheredWithoutCC(t *testing.T) {
 	c := Command{Keyset: pysim3DES(t), TAR: [3]byte{0xb0, 0x00, 0x00}, Data: mustHex(t, "00a40000023f00")}
 
@@ -228,8 +218,7 @@ func TestEncodeCommandCipheredWithoutCC(t *testing.T) {
 	}
 }
 
-// TestCCLength checks an AES key set with 4-octet checksums: CHL and RHL shrink, and the checksum is the first four
-// octets of the CMAC (TS 102 225 clause 5.1.3.1).
+// ETSI TS 102 225 clause 5.1.3.1
 func TestCCLength(t *testing.T) {
 	k := pysimAES(t)
 	k.CCLength = 4
@@ -340,7 +329,6 @@ func TestDecodeResponse(t *testing.T) {
 			data:   "016132",
 		},
 		{
-			// From pySim's smpp-ota-tool documentation: a card refusing a command it cannot authenticate.
 			name:     "unsecured error",
 			keyset:   sja5(t),
 			spi:      secured,
@@ -368,8 +356,6 @@ func TestDecodeResponse(t *testing.T) {
 	}
 }
 
-// TestDecodeResponseWithoutUDHI decodes the PoR of a sysmoISIM-SJA5 that a Samsung Galaxy A56 returned in an
-// SMS-DELIVER-REPORT without TP-UDHI, with the Response Packet's UDH at the start of the user data.
 func TestDecodeResponseWithoutUDHI(t *testing.T) {
 	p := mustHex(t, "027100005412b000109996c2cab4a3302b80c88fe8c5d47462074bd5d39df6ae0016fb515839a2fad763fe44982996c31bc5ff2d1f49356c6800431e439638557e8f43e0ea30aa91057a2667679025c0fcc449ddc873ee0347")
 
@@ -383,8 +369,6 @@ func TestDecodeResponseWithoutUDHI(t *testing.T) {
 	}
 }
 
-// TestEncodeResponse reproduces the PoRs of the SJA5 and of pySim's tests from their decoded content, which checks
-// the tests' encodeResponse.
 func TestEncodeResponse(t *testing.T) {
 	for _, tc := range []struct {
 		keyset Keyset
@@ -425,7 +409,7 @@ func TestDecodeResponseRejectsCommand(t *testing.T) {
 	}
 }
 
-// TestCMAC checks the AES-CMAC examples of RFC 4493 clause 4.
+// RFC 4493 section 4
 func TestCMAC(t *testing.T) {
 	k := Keyset{Algorithm: AES, KID: mustHex(t, "2b7e151628aed2a6abf7158809cf4f3c")}
 	msg := mustHex(t, "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710")

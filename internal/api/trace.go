@@ -11,14 +11,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// untraced are the API paths that are polled, by the kubelet's probes, or that serve a static document.
 var untraced = map[string]bool{"/api/v1/livez": true, "/api/v1/readyz": true, "/api/v1/openapi.yaml": true}
 
-// traced gives each request to the API a server span, named {method} {route} by the mux's pattern, with its
-// http.route. A caller's trace context is linked rather than continued, since the API has no authentication and anyone
-// can send one. The UI's files and the untraced paths have no span. A request that fails is an error of its span,
-// with error.type its 5xx status; its cause is the error that writeError logs within the span, which carries the
-// trace context.
 func traced(tp trace.TracerProvider, mux http.Handler) http.Handler {
 	if tp == nil {
 		return mux
@@ -34,15 +28,10 @@ func traced(tp trace.TracerProvider, mux http.Handler) http.Handler {
 	)
 }
 
-// routed completes the request's span with what otelhttp leaves to the server, once the mux has handled the request:
-// http.route, which otelhttp sets on a span only from a pattern known at its start, and, for a 5xx response,
-// error.type, its status, as the HTTP semantic conventions require of a request that ended with an error. otelhttp
-// names the span by the pattern and sets its status.
 func routed(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		span := trace.SpanFromContext(r.Context())
 		if !span.IsRecording() {
-			// The UI's files and the untraced paths keep the writer as it is, with its io.ReaderFrom.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -60,7 +49,6 @@ func routed(next http.Handler) http.Handler {
 	})
 }
 
-// statusWriter records the status of a response.
 type statusWriter struct {
 	http.ResponseWriter
 
@@ -68,7 +56,6 @@ type statusWriter struct {
 }
 
 func (w *statusWriter) WriteHeader(status int) {
-	// An informational status precedes the final one.
 	if w.status == 0 && status >= http.StatusOK {
 		w.status = status
 	}
@@ -84,7 +71,6 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Unwrap gives http.ResponseController the writer underneath, for its flushes and deadlines.
 func (w *statusWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }

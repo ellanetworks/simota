@@ -40,7 +40,6 @@ import {
   operationLabels,
 } from "@/utils/jobs";
 
-// CARD_OPTIONS is the number of cards offered: the first page, as many as a request takes.
 const CARD_OPTIONS = 100;
 
 const jobs = (n: number) => (n === 1 ? "1 job" : `${n} jobs`);
@@ -49,7 +48,6 @@ export default function NewJobDialog({
   iccids: initial = [],
   onClose,
 }: {
-  // iccids are the cards chosen to begin with.
   iccids?: string[];
   onClose: () => void;
 }) {
@@ -70,13 +68,11 @@ export default function NewJobDialog({
     queryFn: () => listCards({ page: 1, perPage: CARD_OPTIONS }),
   });
   const byIccid = new Map((cards.data?.items ?? []).map((c) => [c.iccid, c]));
-  // The cards chosen to begin with are offered even when they are not on the first page.
   const options = [
     ...initial.filter((i) => !byIccid.has(i)),
     ...byIccid.keys(),
   ];
 
-  // params are the fields of the operation only: the server rejects the others.
   const params = (): JobParams => {
     switch (operation) {
       case "oplmn_set":
@@ -127,8 +123,6 @@ export default function NewJobDialog({
   const mncError = mnc === "" || isMNC(mnc) ? undefined : "2 or 3 digits.";
   const accessError = access.length === 0 ? "Choose at least one." : undefined;
 
-  // An IMSI is one subscription's: it is written to one card, in place of the IMSI on record that the operator
-  // states, which the server checks. A card known to have none needs it set first.
   const writesIMSI = operation === "imsi_write";
   const cardsError =
     writesIMSI && iccids.length > 1
@@ -139,15 +133,12 @@ export default function NewJobDialog({
     iccids.length === 1 &&
     byIccid.has(iccids[0]) &&
     !byIccid.get(iccids[0])?.imsi;
-  // The card's IMSI on record, when the dialog knows it, tells a mistyped current IMSI before the server does; the
-  // error waits until the IMSI typed is as long.
   const imsiOnRecord =
     writesIMSI && iccids.length === 1
       ? byIccid.get(iccids[0])?.imsi
       : undefined;
   const notOnRecord =
     !!imsiOnRecord && previousImsi !== "" && previousImsi !== imsiOnRecord;
-  // isIMSI takes an empty value: an empty field shows no error, and keeps Create disabled.
   const imsiError = isIMSI(imsi) ? undefined : "6 to 15 digits.";
   const previousImsiError = noIMSIOnRecord
     ? "The card has no IMSI on record: edit the card to set the IMSI it holds."
@@ -170,7 +161,6 @@ export default function NewJobDialog({
         previousImsiError === undefined &&
         !notOnRecord));
 
-  // The dialog offers the first CARD_OPTIONS cards only; a card's row on the Cards page reaches any other.
   const moreCards = (cards.data?.total_count ?? 0) > CARD_OPTIONS;
 
   return (
@@ -189,7 +179,6 @@ export default function NewJobDialog({
         multiple
         options={options}
         value={iccids}
-        // A disabled option is only hidden from the pointer: a card without an MSISDN is kept out here too.
         onChange={(_e, v) =>
           setIccids(v.filter((i) => byIccid.get(i)?.msisdn !== ""))
         }
@@ -314,7 +303,6 @@ export default function NewJobDialog({
             <FormLabel>Access Technologies</FormLabel>
             <FormGroup row>{ACCESS_TECHNOLOGIES.map(checkbox)}</FormGroup>
             {accessError && <FormHelperText>{accessError}</FormHelperText>}
-            {/* The others are rare in a private network: they are shown on demand, as an error's details. */}
             <Box>
               <Link
                 component="button"

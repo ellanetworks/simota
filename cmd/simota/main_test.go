@@ -28,12 +28,10 @@ import (
 )
 
 const (
-	e2eICCID = "8988211000000000017"
-	// callerTraceParent is the trace context that the API's caller sends.
+	e2eICCID          = "8988211000000000017"
 	callerTraceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 )
 
-// collector is an OTLP/gRPC trace collector that keeps the spans it receives, and the service.name of their resource.
 type collector struct {
 	collectortrace.UnimplementedTraceServiceServer
 
@@ -82,8 +80,6 @@ func startCollector(t *testing.T) (*collector, string) {
 	return c, l.Addr().String()
 }
 
-// startSMSC starts an SMSC that takes simota's bind and submit_sm, and answers each submit_sm with a delivery receipt
-// UNDELIV: the card is unreachable.
 func startSMSC(t *testing.T) int {
 	t.Helper()
 
@@ -132,7 +128,6 @@ func startSMSC(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// freePort is a port free on the loopback interface.
 func freePort(t *testing.T) int {
 	t.Helper()
 
@@ -146,7 +141,6 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// syncBuffer is a buffer that the logger writes to while the test reads it.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -208,8 +202,6 @@ func (c client) must(method, path, traceparent, body string, want int) string {
 	return b
 }
 
-// TestTraceEndToEnd runs simota as main does, with telemetry on, and follows a job from the API to the SMSC's receipt:
-// the spans exported over OTLP form the trace model of simota's spans, and the logs carry their trace context.
 func TestTraceEndToEnd(t *testing.T) {
 	coll, endpoint := startCollector(t)
 	smscPort := startSMSC(t)
@@ -270,7 +262,6 @@ func TestTraceEndToEnd(t *testing.T) {
 
 	id := created.Result.Items[0].ID
 
-	// The receipt UNDELIV closes the read without a PoR: failed.
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		if _, b := c.do(http.MethodGet, fmt.Sprintf("/api/v1/jobs/%d", id), "", ""); strings.Contains(b, `"status":"failed"`) {
 			break
@@ -281,7 +272,6 @@ func TestTraceEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Stopping exports the spans left.
 	stop()
 	<-stopped
 
@@ -292,7 +282,6 @@ func TestTraceEndToEnd(t *testing.T) {
 	checkTrace(t, coll, logs.String(), id)
 }
 
-// checkTrace checks the spans of job id as the collector received them, and the logs' trace context.
 func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 	t.Helper()
 
@@ -323,13 +312,11 @@ func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 
 	request, process, submit, deliver := one("POST /api/v1/jobs"), one("process jobs"), one("submit_sm"), one("deliver_sm")
 
-	// The request links to its caller's trace context, and starts a trace of its own.
 	if len(request.GetParentSpanId()) != 0 || request.GetKind() != tracepb.Span_SPAN_KIND_SERVER ||
 		len(request.GetLinks()) != 1 || hex.EncodeToString(request.GetLinks()[0].GetTraceId()) != "0af7651916cd43dd8448eb211c80319c" {
 		t.Errorf("request span: parent %x kind %v links %v", request.GetParentSpanId(), request.GetKind(), request.GetLinks())
 	}
 
-	// The job's processing is a trace of its own, linked to the request, with the submit_sm within it.
 	if len(process.GetParentSpanId()) != 0 || process.GetKind() != tracepb.Span_SPAN_KIND_CONSUMER ||
 		!links(process, request) || attr(process, "ella.ota.job.outcome") != "sent" ||
 		attr(process, "ella.ota.job.id") != fmt.Sprint(id) || attr(process, "ella.ota.card.iccid") != e2eICCID {
@@ -343,7 +330,6 @@ func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 			submit.GetAttributes())
 	}
 
-	// The receipt is a trace of its own, linked to the request and to the command it is about.
 	if len(deliver.GetParentSpanId()) != 0 || deliver.GetKind() != tracepb.Span_SPAN_KIND_SERVER ||
 		!links(deliver, request, process) || attr(deliver, "ella.ota.deliver.kind") != "receipt" ||
 		attr(deliver, "ella.ota.deliver.outcome") != "recorded" || attr(deliver, "ella.ota.job.status") != "failed" {
@@ -351,14 +337,12 @@ func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 			deliver.GetLinks(), deliver.GetAttributes())
 	}
 
-	// Each has the store's operations within it.
 	for _, s := range []*tracepb.Span{request, process, deliver} {
 		if children := childrenOf(coll.spans, s); len(children) == 0 {
 			t.Errorf("span %q has no store operation within it", s.GetName())
 		}
 	}
 
-	// No span carries the card's IMSI or MSISDN.
 	for _, s := range coll.spans {
 		for _, kv := range s.GetAttributes() {
 			if v := kv.GetValue().GetStringValue(); strings.Contains(v, "001010000000001") || strings.Contains(v, "15550000001") {
@@ -367,7 +351,6 @@ func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 		}
 	}
 
-	// The job's closing is logged in the receipt's trace.
 	if !strings.Contains(logs, `"msg":"job finished"`) {
 		t.Fatalf("no job finished in the logs:\n%s", logs)
 	}
@@ -380,7 +363,6 @@ func checkTrace(t *testing.T, coll *collector, logs string, id int64) {
 	}
 }
 
-// links reports whether s links, in order, to exactly the spans to.
 func links(s *tracepb.Span, to ...*tracepb.Span) bool {
 	if len(s.GetLinks()) != len(to) {
 		return false
