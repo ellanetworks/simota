@@ -260,7 +260,7 @@ func (d *DB) FinishJob(ctx context.Context, j Job) (err error) {
 
 	defer func() { end(span, err) }()
 
-	return d.finish(ctx, j, "status IN ('queued', 'sent')")
+	return d.finish(ctx, j, false, "status IN ('queued', 'sent')")
 }
 
 func (d *DB) ReviseJob(ctx context.Context, j Job) (err error) {
@@ -268,29 +268,34 @@ func (d *DB) ReviseJob(ctx context.Context, j Job) (err error) {
 
 	defer func() { end(span, err) }()
 
-	return d.finish(ctx, j, "por_missing = 1 AND counter = ?", int64(j.Counter))
+	return d.finish(ctx, j, true, "por_missing = 1 AND counter = ?", int64(j.Counter))
 }
 
-func (d *DB) finish(ctx context.Context, j Job, where string, args ...any) error {
+func (d *DB) finish(ctx context.Context, j Job, revise bool, where string, args ...any) error {
 	if j.Status != JobSucceeded && j.Status != JobUnconfirmed && j.Status != JobFailed {
 		return fmt.Errorf("finish job: status %q is not final", j.Status)
 	}
 
-	return d.tx(ctx, func(tx *sql.Tx) error {
-		now := d.now().UnixMilli()
+	var (
+		op        Operation
+		createdAt int64
+		now       = d.now().UnixMilli()
+	)
 
-		res, err := tx.ExecContext(ctx, `UPDATE jobs SET status = ?, file_size = ?, response = ?, por_status = ?,
-			status_word = ?, warning = ?, data = ?, error = ?, por_missing = ?, updated_at = ? WHERE id = ? AND `+where,
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `UPDATE jobs SET status = ?, file_size = ?, response = ?, por_status = ?,
+			status_word = ?, warning = ?, data = ?, error = ?, por_missing = ?, updated_at = ? WHERE id = ? AND `+where+`
+			RETURNING operation, created_at`,
 			append([]any{
 				j.Status, nullUnknown(j.FileSize), j.Response, nullUnknown(j.PoRStatus), nullUnknown(j.StatusWord), j.Warning,
 				j.Data, j.Error, j.PoRMissing, now, j.ID,
-			}, args...)...)
-		if err != nil {
-			return fmt.Errorf("finish job: %w", err)
+			}, args...)...).Scan(&op, &createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
 		}
 
-		if err := affected(res); err != nil {
-			return err
+		if err != nil {
+			return fmt.Errorf("finish job: %w", err)
 		}
 
 		if j.Status != JobSucceeded {
@@ -306,6 +311,21 @@ func (d *DB) finish(ctx context.Context, j Job, where string, args ...any) error
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	if revise {
+		return nil
+	}
+
+	d.completed.WithLabelValues(string(op), string(j.Status)).Inc()
+
+	if j.Status == JobSucceeded {
+		d.duration.WithLabelValues(string(op)).Observe(float64(now-createdAt) / 1000)
+	}
+
+	return nil
 }
 
 func (d *DB) jobs(ctx context.Context, clause string, args ...any) ([]Job, error) {

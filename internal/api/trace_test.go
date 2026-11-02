@@ -125,7 +125,7 @@ func TestRequestSpan(t *testing.T) {
 func TestUntraced(t *testing.T) {
 	a := newTracedAPI(t, openStore(t))
 
-	for _, path := range []string{"/", "/cards", "/api/v1/livez", "/api/v1/readyz", "/api/v1/openapi.yaml"} {
+	for _, path := range []string{"/", "/cards", "/api/v1/livez", "/api/v1/readyz", "/api/v1/openapi.yaml", "/api/v1/metrics", "/api/v1/pprof/", "/api/v1/pprof/heap"} {
 		a.serve(t, http.MethodGet, path, "")
 	}
 

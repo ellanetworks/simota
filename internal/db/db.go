@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -24,9 +25,11 @@ func isUnique(err error) bool {
 }
 
 type DB struct {
-	conn   *sql.DB
-	now    func() time.Time
-	tracer trace.Tracer
+	conn      *sql.DB
+	now       func() time.Time
+	tracer    trace.Tracer
+	completed *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
 }
 
 var migrations = []string{
@@ -113,7 +116,7 @@ func Open(ctx context.Context, path string, opts ...Option) (*DB, error) {
 
 	conn.SetMaxOpenConns(1)
 
-	d := &DB{conn: conn, now: time.Now}
+	d := &DB{conn: conn, now: time.Now, completed: newCompleted(), duration: newDuration()}
 	for _, opt := range opts {
 		opt(d)
 	}

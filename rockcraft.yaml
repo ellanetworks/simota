@@ -23,15 +23,18 @@ parts:
     plugin: go
     source: .
     source-type: local
+    build-packages:
+      - git
     build-snaps:
-      - go/1.26/stable
+      - go/1.27/stable
       - node/24/stable
     stage-packages:
       - libc6_libs
     override-build: |
       npm ci --prefix ui
       npm run build --prefix ui
-      go build -v -o ${CRAFT_PART_INSTALL}/bin/simota -ldflags "-s -w" ./cmd/simota
+      REVISION=`git rev-parse HEAD`
+      go build -v -o ${CRAFT_PART_INSTALL}/bin/simota -ldflags "-s -w -X main.revision=${REVISION}" ./cmd/simota
 
   simota-release-data:
     plugin: nil

@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var untraced = map[string]bool{"/api/v1/livez": true, "/api/v1/readyz": true, "/api/v1/openapi.yaml": true}
+var untraced = map[string]bool{"/api/v1/livez": true, "/api/v1/readyz": true, "/api/v1/openapi.yaml": true, "/api/v1/metrics": true}
 
 func traced(tp trace.TracerProvider, mux http.Handler) http.Handler {
 	if tp == nil {
@@ -23,7 +23,7 @@ func traced(tp trace.TracerProvider, mux http.Handler) http.Handler {
 		otelhttp.WithPropagators(tracing.Propagator),
 		otelhttp.WithPublicEndpointFn(func(*http.Request) bool { return true }),
 		otelhttp.WithFilter(func(r *http.Request) bool {
-			return strings.HasPrefix(r.URL.Path, "/api/") && !untraced[r.URL.Path]
+			return strings.HasPrefix(r.URL.Path, "/api/") && !untraced[r.URL.Path] && !strings.HasPrefix(r.URL.Path, "/api/v1/pprof/")
 		}),
 	)
 }

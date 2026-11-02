@@ -14,6 +14,7 @@ import (
 	"github.com/ellanetworks/simota/internal/db"
 	"github.com/ellanetworks/simota/internal/tracing"
 	"github.com/ellanetworks/smsc/smpp"
+	"github.com/prometheus/client_golang/prometheus"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -61,6 +62,7 @@ const tracerName = "github.com/ellanetworks/simota/internal/gateway"
 type Gateway struct {
 	cfg    Config
 	tracer trace.Tracer
+	submit *prometheus.HistogramVec
 
 	mu       sync.Mutex
 	settings *Settings
@@ -78,7 +80,10 @@ func New(cfg Config) *Gateway {
 		tp = noop.NewTracerProvider()
 	}
 
-	return &Gateway{cfg: cfg, tracer: tp.Tracer(tracerName, trace.WithSchemaURL(semconv.SchemaURL)), since: time.Now()}
+	return &Gateway{
+		cfg: cfg, tracer: tp.Tracer(tracerName, trace.WithSchemaURL(semconv.SchemaURL)), submit: newSubmitDuration(),
+		since: time.Now(),
+	}
 }
 
 func (g *Gateway) Apply(ctx context.Context, s *Settings) error {
@@ -163,6 +168,10 @@ func (g *Gateway) SubmitSM(ctx context.Context, m *smpp.SubmitSM) (id string, er
 	if c == nil {
 		return "", smpp.ErrNoSession
 	}
+
+	start := time.Now()
+
+	defer func() { g.observeSubmit(start, err) }()
 
 	return c.SubmitSM(ctx, m)
 }
