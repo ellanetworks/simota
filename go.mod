@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/ellanetworks/smsc/smpp v0.0.0-20261028210833-736ded14033a
-	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
@@ -12,8 +12,8 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
-	go.opentelemetry.io/proto/otlp v1.11.0
-	google.golang.org/grpc v1.83.2
+	go.opentelemetry.io/proto/otlp v1.11.1
+	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -25,7 +25,7 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
